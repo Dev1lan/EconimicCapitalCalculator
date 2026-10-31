@@ -291,41 +291,39 @@ std::vector<CashFlowRow> calculate_ann(
     }
     rows.reserve(timeline.size());
 
-    // Функция PMT на оставшемся горизонте [start_idx .. N-1]
-    // Обеспечивающет principal_after == 0.0 в дату погашения при фактических year_fraction
-    auto compute_constant_pmt = [&](size_t start_idx, double remaining_principal, double init_accum_interest) -> double {
-        double sum_discount_factors = 0.0;
-        double cumulative_df = 1.0;
-        double period_growth_minus_one = 0.0;
-        int32_t p_start = (start_idx == 0) ? deal.report_date : timeline[start_idx - 1].date;
+    int32_t period_months = 1;
+    if (deal.regular_rule.period_months.value_or(0) > 0) {
+        period_months = *deal.regular_rule.period_months;
+    } else if (deal.interest_rule.period_months.value_or(0) > 0) {
+        period_months = *deal.interest_rule.period_months;
+    }
 
-        for (size_t i = start_idx; i < timeline.size(); ++i) {
-            const double yf = dates::year_fraction(p_start, timeline[i].date, deal.day_convention);
-            const double r = resolve_cf_rate(deal, p_start, timeline[i].date, config);
-            period_growth_minus_one += r * yf;
-
-            if (timeline[i].is_principal) {
-                cumulative_df /= (1.0 + period_growth_minus_one);
-                sum_discount_factors += cumulative_df;
-                period_growth_minus_one = 0.0;
+    auto compute_standard_pmt = [&](size_t start_idx, double remaining_principal, double annual_rate) -> double {
+        size_t n_payments = 0;
+        for (size_t k = start_idx; k < timeline.size(); ++k) {
+            if (timeline[k].is_principal) {
+                ++n_payments;
             }
-            p_start = timeline[i].date;
+        }
+        if (n_payments == 0) {
+            return 0.0;
         }
 
-        if (sum_discount_factors <= 0.0) {
-            return remaining_principal + init_accum_interest;
+        const double i_rate = annual_rate * (static_cast<double>(period_months) / 12.0);
+        if (std::abs(i_rate) < 1e-12) {
+            return remaining_principal / static_cast<double>(n_payments);
         }
-        return remaining_principal / sum_discount_factors;
+
+        const double factor = std::pow(1.0 + i_rate, static_cast<double>(n_payments));
+        return remaining_principal * (i_rate * factor) / (factor - 1.0);
     };
-
-    double pmt = compute_constant_pmt(0, deal.current_principal, 0.0);
 
     int32_t prev_date = deal.report_date;
     double current_debt = deal.current_principal;
     double accum_interest = 0.0;
     double prev_rate = resolve_cf_rate(deal, deal.report_date, timeline.front().date, config);
+    double pmt = compute_standard_pmt(0, deal.current_principal, prev_rate);
 
-    // Индекс последнего платежа тела для точного обнуления остатка
     size_t last_principal_idx = 0;
     for (size_t i = 0; i < timeline.size(); ++i) {
         if (timeline[i].is_principal) {
@@ -337,9 +335,8 @@ std::vector<CashFlowRow> calculate_ann(
         const auto& ev = timeline[i];
         const double current_rate = resolve_cf_rate(deal, prev_date, ev.date, config);
 
-        // Если для сделки ANN + FLOAT ставка изменилась в дату repricing, пересчитываем аннуитет на остаток срока
         if (i > 0 && std::abs(current_rate - prev_rate) > 1e-12) {
-            pmt = compute_constant_pmt(i, current_debt, accum_interest);
+            pmt = compute_standard_pmt(i, current_debt, current_rate);
         }
         prev_rate = current_rate;
 
@@ -366,7 +363,6 @@ std::vector<CashFlowRow> calculate_ann(
 
         if (ev.is_principal) {
             if (i == last_principal_idx) {
-                // Закрываем остаток в 0.0 в дату последнего платежа
                 row.principal_paid = row.principal_before;
                 row.principal_after = 0.0;
                 row.total_cf = row.interest_paid + row.principal_paid;
