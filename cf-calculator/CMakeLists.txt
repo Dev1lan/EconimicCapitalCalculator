@@ -42,8 +42,12 @@ if(CF_BUILD_TESTS)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
 
-    add_executable(cf_tests
-        tests/test_cf.cpp
+add_executable(cf_tests
+        tests/test_dates.cpp
+        tests/test_simple.cpp
+        tests/test_ann.cpp
+        tests/test_rgm.cpp
+        tests/test_float.cpp
     )
 
     target_link_libraries(cf_tests
