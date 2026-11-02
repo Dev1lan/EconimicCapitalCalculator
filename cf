@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Интерфейс к ядру: ./cf открывает меню, ./cf --help показывает команды.
+exec "${PYTHON:-python3}" "$(dirname "$0")/tools/cf.py" "$@"
