@@ -1,16 +1,21 @@
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "cfcore/csv_io.hpp"
+#include "cfcore/date.hpp"
 #include "cfcore/engine.hpp"
 
 using namespace cfcore;
@@ -18,6 +23,8 @@ using namespace cfcore;
 namespace {
 
 constexpr size_t kBatchSize = 100000;
+constexpr size_t kFormatBlock = 65536;  // строк cashflows.csv на поток за один проход
+constexpr size_t kMaxRowLength = 160;
 
 struct Arguments {
     std::string input;
@@ -26,6 +33,7 @@ struct Arguments {
     int threads = 0;
     bool excel_etalon = false;
     bool write_flows = true;
+    bool details_only = false;
     bool round_output = false;
 };
 
@@ -36,6 +44,7 @@ void print_usage() {
         "  --threads N       число потоков, по умолчанию все ядра\n"
         "  --excel-etalon    правила листа \"1 сделка\"\n"
         "  --no-flows        не писать cashflows.csv\n"
+        "  --details-only    не писать buckets.csv, errors.csv и манифест, без сводки на экране\n"
         "  --round-money     округлить суммы до копеек при выводе\n";
 }
 
@@ -55,6 +64,7 @@ Arguments parse_arguments(int argc, char** argv) {
         else if (name == "--threads") args.threads = std::stoi(value());
         else if (name == "--excel-etalon") args.excel_etalon = true;
         else if (name == "--no-flows") args.write_flows = false;
+        else if (name == "--details-only") args.details_only = true;
         else if (name == "--round-money") args.round_output = true;
         else throw std::runtime_error("неизвестная опция " + name);
     }
@@ -73,6 +83,70 @@ File open_output(const std::filesystem::path& path) {
         throw std::runtime_error("не удалось создать файл: " + path.string());
     }
     return file;
+}
+
+char* append_fixed(char* out, double value) {
+    return std::to_chars(out, out + 64, value, std::chars_format::fixed, 10).ptr;
+}
+
+char* append_digits(char* out, int value, int width) {
+    for (int i = width - 1; i >= 0; --i) {
+        out[i] = static_cast<char>('0' + value % 10);
+        value /= 10;
+    }
+    return out + width;
+}
+
+void append_flow(std::string& text, const CashFlow& flow, bool round_output) {
+    char row[kMaxRowLength];
+    char* end = std::to_chars(row, row + 32, flow.instrument_id).ptr;
+    *end++ = ',';
+    const YearMonthDay ymd = to_ymd(flow.date);
+    end = append_digits(end, ymd.year, 4);
+    *end++ = '-';
+    end = append_digits(end, ymd.month, 2);
+    *end++ = '-';
+    end = append_digits(end, ymd.day, 2);
+    const char* type = flow.type == FlowType::Principal ? ",PRINCIPAL," : ",INTEREST,";
+    end = std::copy(type, type + std::strlen(type), end);
+    end = append_fixed(end, round_output ? round_money(flow.amount) : flow.amount);
+    *end++ = ',';
+    end = append_fixed(end, flow.rate_used);
+    *end++ = ',';
+    end = append_fixed(end, flow.year_fraction);
+    *end++ = '\n';
+    text.append(row, end);
+}
+
+// Текст готовят все потоки, а в файл части идут строго по порядку, поэтому
+// содержимое не зависит от числа потоков.
+void write_flows(FILE* file, std::span<const CashFlow> flows, int threads, bool round_output) {
+    std::vector<std::string> parts(threads);
+    for (std::string& part : parts) {
+        part.reserve(kFormatBlock * kMaxRowLength);
+    }
+    while (!flows.empty()) {
+        std::vector<std::thread> workers;
+        int used = 0;
+        for (; used < threads && !flows.empty(); ++used) {
+            const auto slice = flows.first(std::min(kFormatBlock, flows.size()));
+            flows = flows.subspan(slice.size());
+            parts[used].clear();
+            workers.emplace_back([slice, round_output, &part = parts[used]] {
+                for (const CashFlow& flow : slice) {
+                    append_flow(part, flow, round_output);
+                }
+            });
+        }
+        for (std::thread& worker : workers) {
+            worker.join();
+        }
+        for (int i = 0; i < used; ++i) {
+            if (std::fwrite(parts[i].data(), 1, parts[i].size(), file) != parts[i].size()) {
+                throw std::runtime_error("не удалось записать cashflows.csv, проверьте место на диске");
+            }
+        }
+    }
 }
 
 const char* side_name(Side side) {
@@ -128,11 +202,8 @@ int main(int argc, char** argv) {
             accumulator.merge(result.accumulator);
             errors.insert(errors.end(), result.errors.begin(), result.errors.end());
             deals_ok += result.summaries.size();
-            for (const CashFlow& flow : result.flows) {
-                std::fprintf(flows_file.get(), "%lld,%s,%s,%.10f,%.10f,%.10f\n",
-                             static_cast<long long>(flow.instrument_id), format_date(flow.date).c_str(),
-                             flow.type == FlowType::Principal ? "PRINCIPAL" : "INTEREST",
-                             money(flow.amount), flow.rate_used, flow.year_fraction);
+            if (args.write_flows) {
+                write_flows(flows_file.get(), result.flows, threads, args.round_output);
             }
             for (const DealSummary& s : result.summaries) {
                 flow_count += s.flow_count;
@@ -145,6 +216,22 @@ int main(int argc, char** argv) {
                 }
                 std::fprintf(summary_file.get(), ",%s\n", to_string(s.current_interest_source));
             }
+        }
+
+        if (args.details_only) {
+            // Без errors.csv пропуск сделок был бы незаметен, поэтому о нём сообщаем всегда.
+            if (!errors.empty()) {
+                std::map<std::string, size_t> counts;
+                for (const DealError& error : errors) {
+                    ++counts[to_string(error.code)];
+                }
+                std::fprintf(stderr, "не посчитано сделок: %zu", errors.size());
+                for (const auto& [code, count] : counts) {
+                    std::fprintf(stderr, ", %s %zu", code.c_str(), count);
+                }
+                std::fprintf(stderr, "\n");
+            }
+            return 0;
         }
 
         File buckets_file = open_output(out_dir / "buckets.csv");
