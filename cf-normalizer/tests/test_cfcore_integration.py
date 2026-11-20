@@ -97,3 +97,149 @@ def test_pinned_cfcore_on_all_55_deals(tmp_path, cfcore):
     assert manifest["deals_ok"] == 44
     assert manifest["deals_failed"] == 1
     assert manifest["flows"] == 3965
+
+
+EXAMPLES = REPO_ROOT / "examples/manual"
+BANK_DEAL = {
+    "deal_id": 105,
+    "report_dttm": "2022-08-31",
+    "deal_dttm": "2022-08-31",
+    "maturity_dttm": "2022-10-31",
+    "current_principal_amt": 100000,
+    "currency_id": "RUB",
+    "discriminator": "SIMPLE",
+    "rate_type_cd": "FIXED",
+    "interest_rate": "0.10",
+    "day_convention_cd": "ACT/365",
+    "interest_payment": "2022-09-30 2022-10-31",
+    "principal_payment": "2022-09-10,30000 2022-10-01,70000",
+}
+
+
+def _bank_csv(path, *rows):
+    columns = list(dict.fromkeys(key for row in rows for key in row))
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, columns, delimiter=";")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _run_deals(cfcore, source, out, *options):
+    return main([str(source), "--output-dir", str(out), "--format", "csv",
+                 "--cfcore", str(cfcore), "--threads", "1", *options])
+
+
+def _amounts(flows, kind):
+    return [float(row["amount"]) for row in flows if row["cash_flow_type"] == kind]
+
+
+@pytest.mark.parametrize("example", ["simple-fixed", "rgm-fixed", "ann-fixed", "ann-float", "simple-irregular"])
+def test_manual_examples(tmp_path, cfcore, example):
+    out = tmp_path / "Ручная сделка"
+    source = EXAMPLES / f"{example}.json"
+    expected_id = str(json.loads(source.read_text(encoding="utf-8"))["instrument_id"])
+    assert _run_deals(cfcore, source, out, "--manual") == 0
+    core = out / "core"
+    manifest = json.loads((core / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["deals_ok"] == 1 and manifest["deals_failed"] == 0
+    flows = _read_csv(core / "cashflows.csv")
+    trace = _read_csv(core / "deal_trace.csv")
+    assert {row["instrument_id"] for row in flows + trace} == {expected_id}
+    principal = _amounts(flows, "PRINCIPAL")
+    interest = _amounts(flows, "INTEREST")
+    events = _read_csv(core / "events.csv")
+
+    assert sum(principal) == pytest.approx(100000)
+    assert float(trace[-1]["balance_after"]) == 0
+    assert sum(float(row["interest_paid"]) for row in trace) == pytest.approx(sum(interest))
+    if example == "simple-fixed":
+        assert principal == [100000]
+        assert flows[-1]["payment_date"] == "2022-11-30"
+    if example == "simple-irregular":
+        assert principal == [30000, 70000]
+        assert interest[0] == pytest.approx((100000 * 10 + 70000 * 20) * 0.10 / 365)
+    if example == "rgm-fixed":
+        assert principal == pytest.approx([100000 / 3] * 3)
+        assert interest[0] > interest[1] > interest[2] > 0
+    if example == "ann-fixed":
+        assert principal[0] + interest[0] == pytest.approx(principal[1] + interest[1])
+    if example != "ann-float":
+        assert events == []
+        return
+
+    assert [row["event_date"] for row in events] == ["2022-09-15", "2022-10-31"]
+    assert [float(row["rate_after"]) for row in events] == pytest.approx([0.20, 0.12])
+    assert all(float(row["cash_amount"]) == 0 for row in events)
+    assert [(int(row["days"]), float(row["rate_before"])) for row in trace[:2]] == [(15, 0.10), (15, 0.20)]
+    assert interest[0] == pytest.approx(100000 * (0.10 + 0.20) * 15 / 365)
+    assert [row["event_type"] for row in trace if row["event_date"] == "2022-10-31"] == [
+        "INTEREST", "PRINCIPAL", "REPRICING"
+    ]
+    current_rate = 0.20 / 12
+    working_rule_rate = 0.10 / 12
+    actual_payment = principal[0] + interest[0]
+    assert actual_payment == pytest.approx(100000 * current_rate / (1 - (1 + current_rate) ** -3))
+    assert actual_payment != pytest.approx(100000 * working_rule_rate / (1 - (1 + working_rule_rate) ** -3))
+
+
+def test_manual_matches_deal_in_bank_portfolio(tmp_path, cfcore):
+    source = tmp_path / "Банк.csv"
+    _bank_csv(source, BANK_DEAL, BANK_DEAL | {"deal_id": 900, "product": "Другой портфель"})
+    manual = tmp_path / "manual"
+    bank = tmp_path / "bank"
+    assert _run_deals(cfcore, EXAMPLES / "simple-irregular.json", manual, "--manual") == 0
+    assert _run_deals(cfcore, source, bank, "--events", "--trace-deal", "105") == 0
+    for name in ("cashflows.csv", "deal_summary.csv", "deal_trace.csv"):
+        rows = _read_csv(bank / "core" / name)
+        assert [row for row in rows if row["instrument_id"] == "105"] == _read_csv(manual / "core" / name)
+    bucket_rows = _read_csv(bank / "core/buckets.csv")
+    assert [row for row in bucket_rows if row["portfolio_key"] == "0"] == _read_csv(manual / "core/buckets.csv")
+
+
+def test_combined_diagnostics_without_cashflows(tmp_path, cfcore):
+    source = tmp_path / "deals.csv"
+    _bank_csv(source, BANK_DEAL | {"repricing_dttm_rate_schedule_fixed": "2022-09-30,0.20"})
+    assert _run_deals(cfcore, source, tmp_path / "out", "--events", "--trace-deal", "105", "--no-flows") == 0
+    core = tmp_path / "out/core"
+    assert not (core / "cashflows.csv").exists()
+    assert _read_csv(core / "events.csv")[0]["event_type"] == "REPRICING"
+    assert _read_csv(core / "deal_trace.csv")
+    assert _read_csv(core / "buckets.csv")
+    assert json.loads((core / "run_manifest.json").read_text(encoding="utf-8"))["flows"] > 0
+
+
+@pytest.mark.parametrize("state", ["missing", "empty", "zero", "reported"])
+@pytest.mark.parametrize("excel", [False, True], ids=["base", "excel"])
+def test_first_coupon_current_vs_working_rule(tmp_path, cfcore, state, excel):
+    row = BANK_DEAL | {"deal_dttm": "2022-08-01", "interest_rate": "0.12", "principal_payment": "",
+                       "interest_payment": "2022-08-01 2022-09-30 2022-10-31"}
+    input_values = {"empty": "", "zero": "0", "reported": "123.45"}
+    if state != "missing":
+        row["accrued_interest"] = input_values[state]
+    source = tmp_path / "interest.csv"
+    _bank_csv(source, row)
+    out = tmp_path / "out"
+    assert _run_deals(cfcore, source, out, *(["--excel-etalon"] if excel else [])) == 0
+    with (out / "normalized_deals.csv").open(encoding="utf-8", newline="") as file:
+        normalized = next(csv.DictReader(file, delimiter=";"))
+    assert normalized["accrued_interest"] == input_values.get(state, "")
+    current = _read_csv(out / "core/deal_summary.csv")[0]
+    assert current["current_interest_source"] == ("REPORTED" if state in ("zero", "reported") else "COMPUTED")
+    post_report = 100000 * 0.12 * 30 / 365
+    assert float(current["current_interest"]) == pytest.approx({
+        "zero": 0, "reported": 123.45,
+    }.get(state, post_report))
+    first = _amounts(_read_csv(out / "core/cashflows.csv"), "INTEREST")[0]
+    assert first == pytest.approx(post_report * 2)
+    proposed_coupon = post_report + (123.45 if state == "reported" else 0)
+    assert first != pytest.approx(proposed_coupon)
+
+
+def test_manual_kernel_rejection_is_reported(tmp_path, cfcore):
+    source = tmp_path / "bad.json"
+    deal = json.loads((EXAMPLES / "simple-irregular.json").read_text(encoding="utf-8"))
+    deal["principal_payments"][-1]["amount"] = 50000
+    source.write_text(json.dumps(deal), encoding="utf-8")
+    out = tmp_path / "out"
+    assert _run_deals(cfcore, source, out, "--manual") == 2
+    assert _read_csv(out / "core/errors.csv") == [{"instrument_id": "105", "error_code": "SCHEDULE_ENDS_EARLY"}]

@@ -1,0 +1,17 @@
+{
+  "instrument_id": 103,
+  "reporting_date": "2022-08-31",
+  "start_date": "2022-08-31",
+  "maturity_date": "2022-11-30",
+  "outstanding_principal": 100000,
+  "currency": "RUB",
+  "amortization": "ANN",
+  "rate_type": "FIXED",
+  "interest_rate": 0.1,
+  "day_count": "ACT/365",
+  "accrued_interest": null,
+  "principal_rule": {
+    "period": "1M",
+    "day": 31
+  }
+}

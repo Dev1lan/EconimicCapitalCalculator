@@ -1,0 +1,28 @@
+{
+  "instrument_id": 104,
+  "reporting_date": "2022-08-31",
+  "start_date": "2022-08-31",
+  "maturity_date": "2022-11-30",
+  "outstanding_principal": 100000,
+  "currency": "RUB",
+  "amortization": "ANN",
+  "rate_type": "FLOAT",
+  "day_count": "ACT/365",
+  "accrued_interest": 0,
+  "base_indicator_rate": 0.08,
+  "spread": 0.02,
+  "principal_rule": {
+    "period": "1M",
+    "day": 31
+  },
+  "repricing_rates": [
+    {
+      "date": "2022-09-15",
+      "rate": 0.12
+    },
+    {
+      "date": "2022-10-31",
+      "rate": 0.04
+    }
+  ]
+}

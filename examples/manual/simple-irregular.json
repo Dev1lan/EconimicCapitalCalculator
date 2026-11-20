@@ -1,0 +1,27 @@
+{
+  "instrument_id": 105,
+  "reporting_date": "2022-08-31",
+  "start_date": "2022-08-31",
+  "maturity_date": "2022-10-31",
+  "outstanding_principal": 100000,
+  "currency": "RUB",
+  "amortization": "SIMPLE",
+  "rate_type": "FIXED",
+  "interest_rate": 0.1,
+  "day_count": "ACT/365",
+  "accrued_interest": null,
+  "interest_payment_dates": [
+    "2022-09-30",
+    "2022-10-31"
+  ],
+  "principal_payments": [
+    {
+      "date": "2022-09-10",
+      "amount": 30000
+    },
+    {
+      "date": "2022-10-01",
+      "amount": 70000
+    }
+  ]
+}

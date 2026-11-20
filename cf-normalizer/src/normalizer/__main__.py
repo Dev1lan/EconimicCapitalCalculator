@@ -1,11 +1,14 @@
-"""CLI: банковский CSV -> нормализованные файлы -> опционально cfcore."""
+"""CLI: банковский CSV или ручная сделка -> нормализованные файлы -> cfcore."""
 
 import argparse
+import json
 from pathlib import Path
 import subprocess
+import sys
 
 import polars as pl
 
+from normalizer.manual import read_manual_deal
 from normalizer.processor import normalize_deals
 from normalizer.reader import read_csv
 from normalizer.writer import write_csv, write_parquet, write_quarantine
@@ -13,7 +16,8 @@ from normalizer.writer import write_csv, write_parquet, write_quarantine
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Нормализация входных сделок CF")
-    parser.add_argument("input", type=Path, help="исходный банковский CSV")
+    parser.add_argument("input", type=Path, help="банковский CSV или JSON при --manual")
+    parser.add_argument("--manual", action="store_true", help="рассчитать одну сделку из JSON через cfcore")
     parser.add_argument("--output-dir", type=Path, required=True, help="папка результатов")
     parser.add_argument("--format", choices=("csv", "parquet", "both"), default="both")
     parser.add_argument("--cfcore", type=Path, help="путь к собранному C++-исполняемому файлу cfcore")
@@ -25,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--excel-etalon", action="store_true", help="использовать правила ядра для Excel-эталона")
     args = parser.parse_args(argv)
 
+    if args.manual and args.cfcore is None:
+        parser.error("--manual требует --cfcore")
     if args.cfcore is None and (args.events or args.trace_deal is not None or args.no_flows or args.excel_etalon):
         parser.error("параметры вывода и режима ядра требуют --cfcore")
 
@@ -38,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"исполняемый файл cfcore не найден: {args.cfcore}")
 
     try:
-        source = read_csv(args.input)
+        source = read_manual_deal(args.input) if args.manual else read_csv(args.input)
         result = normalize_deals(source, use_external_fixings=args.fixings is not None)
         output_dir = args.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -50,9 +56,20 @@ def main(argv: list[str] | None = None) -> int:
             path = write_parquet(result.deals, output_dir / "normalized_deals.parquet")
             print(f"Parquet: {path}")
 
-        path = write_quarantine(result.quarantine, output_dir / "quarantine.csv")
-        print(f"Карантин: {path}")
+        quarantine_path = write_quarantine(result.quarantine, output_dir / "quarantine.csv")
+        print(f"Карантин: {quarantine_path}")
         print(f"Обработано: {source.height}; принято: {result.deals.height}; отклонено: {result.quarantine.height}")
+
+        trace_deal = args.trace_deal
+        if args.manual:
+            if result.deals.is_empty():
+                reason = result.quarantine["reason_code"][0]
+                print(f"Ручная сделка отклонена: {reason}. См. {quarantine_path}", file=sys.stderr)
+                return 2
+            instrument_id = int(result.deals["deal_id"][0])
+            if trace_deal is not None and trace_deal != instrument_id:
+                raise ValueError("--trace-deal должен совпадать с instrument_id ручной сделки")
+            trace_deal = instrument_id
 
         if args.cfcore is not None:
             core_dir = output_dir / "core"
@@ -64,16 +81,22 @@ def main(argv: list[str] | None = None) -> int:
                 command.extend(["--fixings", str(args.fixings.resolve())])
             if args.threads is not None:
                 command.extend(["--threads", str(args.threads)])
-            if args.events:
+            if args.events or args.manual:
                 command.append("--events")
-            if args.trace_deal is not None:
-                command.extend(["--trace-deal", str(args.trace_deal)])
+            if trace_deal is not None:
+                command.extend(["--trace-deal", str(trace_deal)])
             if args.no_flows:
                 command.append("--no-flows")
             if args.excel_etalon:
                 command.append("--excel-etalon")
             print(f"Запуск cfcore; результаты: {core_dir}", flush=True)
-            return subprocess.run(command, check=False).returncode
+            completed = subprocess.run(command, check=False)
+            if completed.returncode or not args.manual:
+                return completed.returncode
+            manifest = json.loads((core_dir / "run_manifest.json").read_text(encoding="utf-8"))
+            if manifest["deals_ok"] != 1:
+                print(f"Ручная сделка не рассчитана. См. {core_dir / 'errors.csv'}", file=sys.stderr)
+                return 2
     except (OSError, ValueError, subprocess.SubprocessError, pl.exceptions.PolarsError) as exc:
         parser.exit(2, f"Ошибка: {exc}\n")
 
