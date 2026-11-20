@@ -1,0 +1,177 @@
+{
+  "contract_name": "cf-normalizer-to-cfcore",
+  "version": "1.0.0",
+  "core_repository": "Dev1lan/EconimicCapitalCalculator",
+  "core_ref": "develop/core",
+  "core_commit": "6fa3b5c343d271f7ee6f245256fcc501ab97cafb",
+  "source_csv": {
+    "delimiter": ";",
+    "encoding": "UTF-8 (optional BOM)",
+    "all_values": "utf8 or null; no type inference in reader",
+    "required_columns": [
+      "deal_id",
+      "report_dttm",
+      "discriminator",
+      "currency_id",
+      "current_principal_amt",
+      "deal_dttm",
+      "maturity_dttm",
+      "rate_type_cd",
+      "interest_rate",
+      "day_convention_cd"
+    ],
+    "extra_columns": "allowed and ignored unless explicitly mapped",
+    "date_formats": ["DD.MM.YYYY", "YYYY-MM-DD"]
+  },
+  "normalized_csv": {
+    "filename": "normalized_deals.csv",
+    "delimiter": ";",
+    "encoding": "UTF-8",
+    "bom": false,
+    "line_endings": ["LF", "CRLF"],
+    "header": "all 29 fields, in fields array order, no extras",
+    "optional_null": "empty string",
+    "date_format": "YYYY-MM-DD",
+    "number_format": "base-10 with dot as decimal separator, no NaN/Inf",
+    "schedule_item_separator": "single ASCII space",
+    "schedule_pair_separator": ","
+  },
+  "parquet_v1": {
+    "filename": "normalized_deals.parquet",
+    "status": "optional output; cfcore has no Parquet/Arrow reader yet",
+    "columns": "same 29 names and order as fields",
+    "null_encoding": "Arrow null for optional values; never substitute zero",
+    "date32_definition": "signed days since 1970-01-01",
+    "list_encoding": "canonical UTF-8 schedule strings; typed nested lists require a new wire version"
+  },
+  "fields": [
+    {
+      "name": "deal_id", "source": "deal_id", "csv_type": "int64", "parquet_type": "int64", "nullable": false,
+      "constraints": "valid signed 64-bit integer; unique within input file"
+    },
+    {
+      "name": "report_dttm", "source": "report_dttm", "csv_type": "iso_date", "parquet_type": "date32", "nullable": false
+    },
+    {
+      "name": "discriminator", "source": "discriminator", "csv_type": "enum", "parquet_type": "utf8", "nullable": false,
+      "enum": ["ANN", "RGM", "SIMPLE"]
+    },
+    {
+      "name": "currency_id", "source": "currency_id", "csv_type": "enum", "parquet_type": "utf8", "nullable": false,
+      "enum": ["RUB"]
+    },
+    {
+      "name": "side", "source": "sign(current_principal_amt)", "csv_type": "enum", "parquet_type": "utf8", "nullable": false,
+      "enum": ["ASSET", "LIABILITY"]
+    },
+    {
+      "name": "portfolio_key", "source": "first-seen (product, behavior_model_cd) pair", "csv_type": "int32", "parquet_type": "int32", "nullable": false,
+      "constraints": "non-negative 0-based index in accepted-row order; preserve mapping across batches"
+    },
+    {
+      "name": "current_principal_amt", "source": "abs(current_principal_amt)", "csv_type": "float64", "parquet_type": "float64", "nullable": false,
+      "constraints": "finite and strictly positive; side carries the sign"
+    },
+    {
+      "name": "deal_dttm", "source": "deal_dttm", "csv_type": "iso_date", "parquet_type": "date32", "nullable": false
+    },
+    {
+      "name": "maturity_dttm", "source": "maturity_dttm", "csv_type": "iso_date", "parquet_type": "date32", "nullable": false,
+      "constraints": "strictly after report_dttm"
+    },
+    {
+      "name": "rate_type_cd", "source": "rate_type_cd", "csv_type": "enum", "parquet_type": "utf8", "nullable": false,
+      "enum": ["FIXED", "FLOAT"]
+    },
+    {
+      "name": "interest_rate", "source": "interest_rate", "csv_type": "float64", "parquet_type": "float64", "nullable": false,
+      "constraints": "finite, fraction not percent; >= 0 for FIXED, FLOAT spread may be negative"
+    },
+    {
+      "name": "base_indicator_rate", "source": "base_indicator_rate", "csv_type": "float64", "parquet_type": "float64", "nullable": true,
+      "constraints": "finite; may be omitted when external --fixings are provided"
+    },
+    {
+      "name": "cap_limit_interest_rate", "source": "cap_limit_interest_rate", "csv_type": "float64", "parquet_type": "float64", "nullable": true,
+      "constraints": "finite; >= floor_limit_interest_rate when both exist"
+    },
+    {
+      "name": "floor_limit_interest_rate", "source": "floor_limit_interest_rate", "csv_type": "float64", "parquet_type": "float64", "nullable": true,
+      "constraints": "finite; <= cap_limit_interest_rate when both exist"
+    },
+    {
+      "name": "accrued_interest", "source": "accrued_interest", "csv_type": "float64", "parquet_type": "float64", "nullable": true,
+      "constraints": "finite; explicit 0 must remain 0, not null"
+    },
+    {
+      "name": "day_convention_cd", "source": "day_convention_cd (mapped)", "csv_type": "enum", "parquet_type": "utf8", "nullable": false,
+      "enum": ["ACT_365", "ACT_ACT_ISDA"],
+      "mapping": {"ACT/365": "ACT_365", "ACT/ACT": "ACT_ACT_ISDA", "ACT/ACT ISDA": "ACT_ACT_ISDA"}
+    },
+    {
+      "name": "interest_payment_rule_start_dttm", "source": "interest_payment_rule_start_dttm", "csv_type": "iso_date", "parquet_type": "date32", "nullable": true
+    },
+    {
+      "name": "interest_payment_rule_period_cd", "source": "interest_payment_rule_period_cd", "csv_type": "period", "parquet_type": "utf8", "nullable": true,
+      "pattern": "^(ENDDATE|[1-9][0-9]*[MD])$"
+    },
+    {
+      "name": "interest_payment_rule_day_num", "source": "interest_payment_rule_day_num", "csv_type": "int32", "parquet_type": "int32", "nullable": true,
+      "constraints": "0..31; absent means 0 to cfcore"
+    },
+    {
+      "name": "regular_payment_rule_start_dttm", "source": "regular_payment_rule_start_dttm", "csv_type": "iso_date", "parquet_type": "date32", "nullable": true
+    },
+    {
+      "name": "regular_payment_rule_period_cd", "source": "regular_payment_rule_period_cd", "csv_type": "period", "parquet_type": "utf8", "nullable": true,
+      "pattern": "^(ENDDATE|[1-9][0-9]*[MD])$"
+    },
+    {
+      "name": "regular_payment_rule_day_num", "source": "regular_payment_rule_day_num", "csv_type": "int32", "parquet_type": "int32", "nullable": true,
+      "constraints": "0..31; absent means 0 to cfcore"
+    },
+    {
+      "name": "repricing_rule_start_dttm", "source": "repricing_rule_start_dttm", "csv_type": "iso_date", "parquet_type": "date32", "nullable": true
+    },
+    {
+      "name": "repricing_rule_period_cd", "source": "repricing_rule_period_cd", "csv_type": "period", "parquet_type": "utf8", "nullable": true,
+      "pattern": "^(ENDDATE|[1-9][0-9]*[MD])$"
+    },
+    {
+      "name": "repricing_rule_day_num", "source": "repricing_rule_day_num", "csv_type": "int32", "parquet_type": "int32", "nullable": true,
+      "constraints": "-1 or 0..31; absent means 0 to cfcore"
+    },
+    {
+      "name": "interest_payment", "source": "interest_payment", "csv_type": "date_list", "parquet_type": "utf8", "nullable": true,
+      "grammar": "YYYY-MM-DD[ YYYY-MM-DD]*"
+    },
+    {
+      "name": "principal_payment", "source": "principal_payment", "csv_type": "date_amount_list", "parquet_type": "utf8", "nullable": true,
+      "grammar": "YYYY-MM-DD,number[ YYYY-MM-DD,number]*; non-negative amounts"
+    },
+    {
+      "name": "repricing_dttm_schedule", "source": "repricing_dttm_schedule", "csv_type": "date_list", "parquet_type": "utf8", "nullable": true,
+      "grammar": "YYYY-MM-DD[ YYYY-MM-DD]*"
+    },
+    {
+      "name": "repricing_dttm_rate_schedule_fixed", "source": "repricing_dttm_rate_schedule_fixed", "csv_type": "date_amount_list", "parquet_type": "utf8", "nullable": true,
+      "grammar": "YYYY-MM-DD,number[ YYYY-MM-DD,number]*; finite rates"
+    }
+  ],
+  "quarantine_csv": {
+    "filename": "quarantine.csv",
+    "delimiter": ",",
+    "columns": ["deal_id", "reason_code"],
+    "reason_codes": [
+      "UNSUPPORTED_CURRENCY",
+      "SUB_BLOCK_UNSUPPORTED",
+      "MISSING_REQUIRED",
+      "INVALID_ID",
+      "INVALID_NUMBER",
+      "INVALID_DATE",
+      "INVALID_ENUM",
+      "INVALID_RULE",
+      "INVALID_SCHEDULE"
+    ]
+  }
+}
