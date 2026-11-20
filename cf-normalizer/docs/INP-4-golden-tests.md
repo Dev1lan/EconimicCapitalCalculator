@@ -32,24 +32,12 @@ python -m pip install -e ".[dev]"
 python -m pytest tests/ -q
 ```
 
-Для тестирования настоящего C++-ядра дополнительно требуются собранный `cfcore` и файл `data/input/key_rate.csv` из указанного коммита ядра.
+Для интеграционных тестов установите `CFCORE_BIN` на путь к собранному ядру.
+Команды для Windows и POSIX есть в [инструкции сквозного запуска](../../docs/cf-integration.md).
 
-Linux/macOS:
-
-```bash
-export CFCORE_BIN=/path/to/cfcore
-export CFCORE_FIXINGS=/path/to/data/input/key_rate.csv
-python -m pytest tests/ -q
-```
-
-Windows PowerShell:
-
-```powershell
-$env:CFCORE_BIN = 'C:\path\to\cfcore.exe'
-$env:CFCORE_FIXINGS = 'C:\path\to\data\input\key_rate.csv'
-python -m pytest tests/ -q
-```
-
-Если обе переменные не заданы, тест C++-ядра пропускается. Файл ставок проверяется по SHA-256; эталонные данные соответствуют только закреплённой версии ядра.
+Тест МАИ берёт `data/input/key_rate.csv` из репозитория. `CFCORE_FIXINGS` позволяет подать копию того же файла.
+Хеш SHA-256 считается после замены CRLF на LF. Он проверяет все байты содержимого
+и порядок записей после нормализации границ строк. Для карантина эталон приводится к LF,
+а сгенерированный файл проверяется побайтно. Ручная подготовка файлов не нужна.
 
 Эталоны обновляются при согласованном изменении контракта или версии ядра. Ошибка №20 не исправляется нормализатором.

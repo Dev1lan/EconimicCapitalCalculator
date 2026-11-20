@@ -81,6 +81,7 @@
 Всё сразу (сборка, тесты, 55 сделок, синтетика):
 
 ```bash
+python3 -m pip install -e ./cf-normalizer
 bash tools/demo.sh 10000
 ```
 
@@ -98,19 +99,15 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j8 && cte
 cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DCFCORE_SANITIZE=ON && cmake --build build-asan -j8 && ctest --test-dir build-asan
 ```
 
-Тестовые сделки МАИ через временный нормализатор:
+Тестовые сделки МАИ через штатный нормализатор:
 
 ```bash
-python3 tools/normalize_stub.py data/input/test_deals_mai.csv out/mai/deals.csv out/mai/quarantine.csv
+python3 -m normalizer data/input/test_deals_mai.csv --output-dir out/mai --format csv \
+  --cfcore build/core/cfcore --fixings data/input/key_rate.csv
+python3 tools/verify_output.py out/mai/core
 ```
 
-```bash
-./build/core/cfcore --input out/mai/deals.csv --output-dir out/mai/run --fixings data/input/key_rate.csv
-```
-
-```bash
-python3 tools/verify_output.py out/mai/run
-```
+Ручной расчёт и команды для Windows описаны в [инструкции сквозного запуска](docs/cf-integration.md).
 
 Синтетический портфель. Один `seed` всегда даёт один и тот же файл, `--bad-share` намеренно портит долю сделок:
 
@@ -495,7 +492,7 @@ sum = t
 
 ## 6. Как проверяется точность
 
-Всего 97 тестов. Они проходят в обычной сборке и с AddressSanitizer и UBSan.
+CTest запускает модульные и эталонные проверки C++. При наличии Python также проверяется CLI. Сквозные Python-тесты запускаются отдельно.
 
 | Проверка | Что подтверждает |
 |---|---|
@@ -565,8 +562,7 @@ sum = t
 
 ## 9. Как подключить нормализатор
 
-1. Нормализатор выдаёт файл по разделу 4. Заменить [`tools/normalize_stub.py`](tools/normalize_stub.py): он только показывает ожидаемый результат.
-2. История КС передаётся через `--fixings`, либо `base_indicator_rate` заполняется для каждой плавающей сделки.
-3. При переходе на Arrow заменяется только [`core/src/csv_io.cpp`](core/src/csv_io.cpp): класс чтения должен заполнять те же `Deal` и `DealArena`.
-4. Портфельный ключ сейчас: `product` + `behavior_model_cd`. Мусорные значения `product` считаются пустыми.
-5. Перед передачей в ядро нормализатор должен отправлять в карантин другие валюты и блок `sub_*`.
+Установите пакет из [`cf-normalizer`](cf-normalizer). CLI нормализует банковский CSV или ручной JSON, сохраняет карантин и при `--cfcore` запускает ядро. Parquet доступен для экспорта через Python. Ядро читает CSV v1.
+
+- [Сборка, запуск портфеля и ручной сделки](docs/cf-integration.md)
+- [Рабочие решения по финансовой методике](docs/cf-methodology-decisions.md)
