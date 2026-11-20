@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <sstream>
 #include <stdexcept>
 
@@ -52,6 +53,10 @@ bool read_line(std::istream& stream, std::string& line) {
         line.pop_back();
     }
     return true;
+}
+
+std::filesystem::path path_from_utf8(const std::string& text) {
+    return std::filesystem::path(std::u8string(text.begin(), text.end()));
 }
 
 double require_double(const std::string& text) {
@@ -202,7 +207,7 @@ std::string format_date(Date date) {
     return buffer;
 }
 
-CsvDealReader::CsvDealReader(const std::string& path) : file_(path) {
+CsvDealReader::CsvDealReader(const std::string& path) : file_(path_from_utf8(path)) {
     if (!file_) {
         throw std::runtime_error("не удалось открыть файл: " + path);
     }
@@ -289,7 +294,7 @@ bool CsvDealReader::next_batch(size_t max_deals, std::vector<Deal>& deals, DealA
 }
 
 std::vector<RateFixing> read_fixings(const std::string& path) {
-    std::ifstream file(path);
+    std::ifstream file(path_from_utf8(path));
     if (!file) {
         throw std::runtime_error("не удалось открыть файл: " + path);
     }

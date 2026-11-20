@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -18,7 +19,7 @@ struct GoldenRow {
     int bucket;
 };
 
-std::vector<std::vector<std::string>> read_csv(const std::string& path) {
+std::vector<std::vector<std::string>> read_csv(const std::filesystem::path& path) {
     std::ifstream file(path);
     std::vector<std::vector<std::string>> rows;
     std::string line;
@@ -37,7 +38,7 @@ std::vector<std::vector<std::string>> read_csv(const std::string& path) {
 
 std::vector<GoldenRow> golden_rows() {
     std::vector<GoldenRow> result;
-    for (const auto& row : read_csv(CFCORE_GOLDEN_DIR "/deal1_flows.csv")) {
+    for (const auto& row : read_csv(u8"" CFCORE_GOLDEN_DIR "/deal1_flows.csv")) {
         const int y = std::stoi(row[0].substr(0, 4));
         const int m = std::stoi(row[0].substr(5, 2));
         const int d = std::stoi(row[0].substr(8, 2));
@@ -87,7 +88,7 @@ TEST(Golden, DealOneBucketsReproduceSheetNpv) {
     const BucketTotals& vector = totals.begin()->second;
 
     double npv_base = 0.0, npv_stress = 0.0;
-    for (const auto& row : read_csv(CFCORE_GOLDEN_DIR "/deal1_df.csv")) {
+    for (const auto& row : read_csv(u8"" CFCORE_GOLDEN_DIR "/deal1_df.csv")) {
         const int k = std::stoi(row[0]);
         const double flow = vector.principal[k] + vector.interest[k];
         npv_base += flow * std::stod(row[2]);

@@ -4,7 +4,11 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 #include "cfcore/csv_io.hpp"
 #include "cfcore/date.hpp"
@@ -30,7 +34,12 @@ const char kSimpleRow[] =
 class TempFile {
 public:
     explicit TempFile(const std::string& content) {
-        path_ = "cfcore_test_" + std::to_string(getpid()) + "_" + std::to_string(counter_++) + ".csv";
+#ifdef _WIN32
+        const int pid = _getpid();
+#else
+        const auto pid = getpid();
+#endif
+        path_ = "cfcore_test_" + std::to_string(pid) + "_" + std::to_string(counter_++) + ".csv";
         std::ofstream(path_) << content;
     }
     ~TempFile() { std::remove(path_.c_str()); }

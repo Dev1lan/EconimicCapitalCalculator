@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -12,7 +13,7 @@ using namespace cfcore;
 namespace {
 
 std::vector<std::vector<int>> read_int_csv(const std::string& name) {
-    std::ifstream file(std::string(CFCORE_TEST_DATA_DIR) + "/" + name);
+    std::ifstream file(std::filesystem::path(u8"" CFCORE_TEST_DATA_DIR) / name);
     std::vector<std::vector<int>> rows;
     std::string line;
     std::getline(file, line);  // заголовок

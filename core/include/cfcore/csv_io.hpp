@@ -14,7 +14,7 @@ namespace cfcore {
 // при переходе на Arrow заменяется этот класс, расчёт не меняется.
 class CsvDealReader {
 public:
-    // Бросает std::runtime_error, если файла нет или не хватает колонки.
+    // Путь в UTF-8. Бросает std::runtime_error, если файла нет или не хватает колонки.
     explicit CsvDealReader(const std::string& path);
 
     // Очищает порцию и читает до max_deals сделок. false: файл закончился и порция пуста.
@@ -27,7 +27,7 @@ private:
     std::map<std::string, size_t> columns_;
 };
 
-// История индикатора: файл с колонками date,value, отсортированный по дате.
+// История индикатора: файл с колонками date,value, отсортированный по дате. Путь в UTF-8.
 std::vector<RateFixing> read_fixings(const std::string& path);
 
 std::string format_date(Date date);

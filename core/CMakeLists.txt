@@ -12,7 +12,7 @@ target_include_directories(cfcore PUBLIC include PRIVATE src)
 # Настройки вычислений наследуются всеми, кто линкуется с ядром, включая тесты.
 add_library(cfcore_options INTERFACE)
 if(MSVC)
-  target_compile_options(cfcore_options INTERFACE /W4 /fp:precise)
+  target_compile_options(cfcore_options INTERFACE /W4 /fp:precise /utf-8)
 else()
   # -ffp-contract=off: компилятор не объединяет a*b+c в одну операцию,
   # иначе результат на ARM и x86 будет отличаться.
@@ -39,6 +39,9 @@ endif()
 add_executable(cfcore_cli cli/main.cpp)
 set_target_properties(cfcore_cli PROPERTIES OUTPUT_NAME cfcore)
 target_link_libraries(cfcore_cli PRIVATE cfcore)
+if(MINGW)
+  target_link_options(cfcore_cli PRIVATE -municode)
+endif()
 
 include(GoogleTest)
 add_executable(cfcore_tests
@@ -56,3 +59,15 @@ target_compile_definitions(cfcore_tests PRIVATE
   CFCORE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
   CFCORE_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/data/golden")
 gtest_discover_tests(cfcore_tests)
+
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  set(CFCORE_CLI_TEST_COMMAND "${Python3_EXECUTABLE}" -X utf8
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py" "$<TARGET_FILE:cfcore_cli>")
+  add_test(NAME Cli.PathsAndManifest COMMAND ${CFCORE_CLI_TEST_COMMAND}
+    Cli.test_unicode_paths_and_manifest Cli.test_manifest_round_trips_native_path)
+  if(NOT WIN32)
+    add_test(NAME Cli.ManifestEscapesSpecialCharacters COMMAND ${CFCORE_CLI_TEST_COMMAND}
+      Cli.test_manifest_escapes_quotes_backslashes_and_controls)
+  endif()
+endif()

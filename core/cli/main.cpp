@@ -48,12 +48,12 @@ void print_usage() {
         "  --round-money     округлить суммы до копеек при выводе\n";
 }
 
-Arguments parse_arguments(int argc, char** argv) {
+Arguments parse_arguments(std::span<const std::string> argv) {
     Arguments args;
-    for (int i = 1; i < argc; ++i) {
-        const std::string name = argv[i];
-        const auto value = [&]() -> std::string {
-            if (i + 1 >= argc) {
+    for (size_t i = 1; i < argv.size(); ++i) {
+        const std::string& name = argv[i];
+        const auto value = [&]() -> const std::string& {
+            if (i + 1 >= argv.size()) {
                 throw std::runtime_error("нет значения для " + name);
             }
             return argv[++i];
@@ -74,13 +74,41 @@ Arguments parse_arguments(int argc, char** argv) {
     return args;
 }
 
+std::string utf8_path(const std::filesystem::path& path) {
+    const auto text = path.u8string();
+    return {text.begin(), text.end()};
+}
+
+std::string json_string(const std::string& text) {
+    constexpr char hex[] = "0123456789abcdef";
+    std::string quoted = "\"";
+    for (unsigned char byte : text) {
+        if (byte == '"' || byte == '\\') {
+            quoted += '\\';
+            quoted += static_cast<char>(byte);
+        } else if (byte < 0x20) {
+            quoted += "\\u00";
+            quoted += hex[byte >> 4];
+            quoted += hex[byte & 0x0f];
+        } else {
+            quoted += static_cast<char>(byte);
+        }
+    }
+    quoted += '"';
+    return quoted;
+}
+
 // Файл закрывается автоматически, ошибка открытия останавливает запуск.
 using File = std::unique_ptr<FILE, int (*)(FILE*)>;
 
 File open_output(const std::filesystem::path& path) {
+#ifdef _WIN32
+    File file(_wfopen(path.c_str(), L"w"), std::fclose);
+#else
     File file(std::fopen(path.c_str(), "w"), std::fclose);
+#endif
     if (!file) {
-        throw std::runtime_error("не удалось создать файл: " + path.string());
+        throw std::runtime_error("не удалось создать файл: " + utf8_path(path));
     }
     return file;
 }
@@ -153,22 +181,20 @@ const char* side_name(Side side) {
     return side == Side::Asset ? "ASSET" : "LIABILITY";
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    if (argc == 1 || std::strcmp(argv[1], "--help") == 0) {
+int run_cli(std::span<const std::string> argv) {
+    if (argv.size() == 1 || argv[1] == "--help") {
         print_usage();
-        return argc == 1 ? 1 : 0;
+        return argv.size() == 1 ? 1 : 0;
     }
     try {
         const auto started = std::chrono::steady_clock::now();
-        const Arguments args = parse_arguments(argc, argv);
+        const Arguments args = parse_arguments(argv);
         const int threads = args.threads > 0 ? args.threads
                                              : static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
         const Policy policy = args.excel_etalon ? Policy::excel_etalon() : Policy{};
         const auto money = [&](double value) { return args.round_output ? round_money(value) : value; };
 
-        const std::filesystem::path out_dir(args.output_dir);
+        const std::filesystem::path out_dir(std::u8string(args.output_dir.begin(), args.output_dir.end()));
         std::filesystem::create_directories(out_dir);
 
         File flows_file(nullptr, std::fclose);
@@ -257,12 +283,12 @@ int main(int argc, char** argv) {
         const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - started;
         File manifest = open_output(out_dir / "run_manifest.json");
         std::fprintf(manifest.get(),
-                     "{\n  \"input\": \"%s\",\n  \"mode\": \"%s\",\n  \"threads\": %d,\n"
+                     "{\n  \"input\": %s,\n  \"mode\": \"%s\",\n  \"threads\": %d,\n"
                      "  \"deals_ok\": %zu,\n  \"deals_failed\": %zu,\n  \"flows\": %zu,\n"
                      "  \"seconds\": %.3f,\n  \"policy\": {\n    \"force_act365\": %s,\n"
                      "    \"close_residual\": %s,\n    \"first_period_from_prev_pay\": %s,\n"
                      "    \"include_payment_on_report\": %s,\n    \"float_rate_is_spread\": %s\n  }\n}\n",
-                     args.input.c_str(), args.excel_etalon ? "EXCEL_ETALON" : "BASE", threads, deals_ok,
+                     json_string(args.input).c_str(), args.excel_etalon ? "EXCEL_ETALON" : "BASE", threads, deals_ok,
                      errors.size(), flow_count, elapsed.count(), policy.force_act365 ? "true" : "false",
                      policy.close_residual ? "true" : "false",
                      policy.first_period_from_prev_pay ? "true" : "false",
@@ -277,3 +303,21 @@ int main(int argc, char** argv) {
         return 2;
     }
 }
+
+}  // namespace
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv) {
+    std::vector<std::string> arguments;
+    arguments.reserve(argc);
+    for (int i = 0; i < argc; ++i) {
+        arguments.push_back(utf8_path(argv[i]));
+    }
+    return run_cli(arguments);
+}
+#else
+int main(int argc, char** argv) {
+    const std::vector<std::string> arguments(argv, argv + argc);
+    return run_cli(arguments);
+}
+#endif
