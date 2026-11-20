@@ -22,6 +22,8 @@ _FIELDS = {
     "cap": "cap_limit_interest_rate",
     "floor": "floor_limit_interest_rate",
     "accrued_interest": "accrued_interest",
+    "indicator_lag_days": "indicator_lag_days",
+    "indicator_lag_cd": "indicator_lag_cd",
 }
 _RULES = {
     "interest_rule": "interest_payment_rule",
@@ -33,8 +35,9 @@ _SCHEDULES = {
     "principal_payments": ("principal_payment", "amount"),
     "repricing_dates": ("repricing_dttm_schedule", None),
     "repricing_rates": ("repricing_dttm_rate_schedule_fixed", "rate"),
+    "repricing_final_rates": ("repricing_final_rate_schedule", "rate"),
 }
-_FIELDS_WITH_SPECIAL_HANDLING = {"side", "outstanding_principal", "interest_rate", "spread"}
+_FIELDS_WITH_SPECIAL_HANDLING = {"side", "outstanding_principal", "interest_rate", "spread", "policy"}
 
 
 def _text(value, name: str) -> str | None:
@@ -81,6 +84,10 @@ def _schedule(value, name: str, value_key: str | None) -> str | None:
 
 
 def read_manual_deal(path: Path) -> pl.DataFrame:
+    return read_manual_deal_with_policy(path)[0]
+
+
+def read_manual_deal_with_policy(path: Path) -> tuple[pl.DataFrame, str | None]:
     data = json.loads(path.read_text(encoding="utf-8-sig"), parse_float=Decimal)
     if not isinstance(data, dict):
         raise ValueError("Ручная сделка должна быть одним объектом JSON")
@@ -120,4 +127,4 @@ def read_manual_deal(path: Path) -> pl.DataFrame:
     if amortization == "ANN" and data.get("interest_rule") is not None and data.get("principal_rule") is not None:
         raise ValueError("ANN: задайте одно правило общего платёжного графика")
 
-    return pl.DataFrame([row], schema={column: pl.String for column in row})
+    return pl.DataFrame([row], schema={column: pl.String for column in row}), _text(data.get("policy"), "policy")

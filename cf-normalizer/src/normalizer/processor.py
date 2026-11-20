@@ -1,4 +1,4 @@
-"""Нормализация банковских сделок по контракту INP-14 v1.
+"""Нормализация банковских сделок по контракту INP-14.
 
 Модуль не рассчитывает денежные потоки и не записывает файлы: это задачи
 ядра C++ и writer.py соответственно.
@@ -32,6 +32,9 @@ OUTPUT_COLUMNS = (
     "interest_payment", "principal_payment", "repricing_dttm_schedule",
     "repricing_dttm_rate_schedule_fixed",
 )
+
+V2_FIELDS = ("repricing_final_rate_schedule", "indicator_lag_days")
+OUTPUT_COLUMNS_V2 = OUTPUT_COLUMNS + V2_FIELDS
 
 REQUIRED_SOURCE_COLUMNS = (
     "deal_id", "report_dttm", "discriminator", "currency_id", "current_principal_amt",
@@ -75,6 +78,7 @@ def _normalize_row(
     duplicate_ids: set[int],
     portfolio_keys: dict[tuple[str, str], int],
     use_external_fixings: bool,
+    contractual_v2: bool,
 ) -> dict[str, str | None]:
     # Порядок проверок соответствует приоритету причин карантина в INP-14.
     if _cell(row, "currency_id") != "RUB":
@@ -139,6 +143,23 @@ def _normalize_row(
         _cell(row, "repricing_dttm_rate_schedule_fixed"), nonnegative=False
     )
 
+    if contractual_v2:
+        if _cell(row, "indicator_lag_cd"):
+            raise RowError("UNSUPPORTED_INDICATOR_LAG")
+        if _cell(row, "repricing_dttm_rate_schedule") or (
+            rate_type == "FLOAT" and result["repricing_dttm_rate_schedule_fixed"]
+        ):
+            raise RowError("AMBIGUOUS_RATE_SCHEDULE")
+        result["repricing_final_rate_schedule"] = parse_pairs(
+            _cell(row, "repricing_final_rate_schedule"), nonnegative=False
+        )
+        lag = _cell(row, "indicator_lag_days")
+        result["indicator_lag_days"] = (
+            str(parse_int(lag, "INVALID_INDICATOR_LAG", 0, 2**31 - 1)) if lag else None
+        )
+    elif any(_cell(row, name) for name in V2_FIELDS):
+        raise RowError("UNSUPPORTED")
+
     # Ключ создаём только после успешной валидации строки.
     product = _cell(row, "product")
     if product == "product":
@@ -171,16 +192,16 @@ def _normalize_row(
 
 
 def normalize_deals(
-    deals: pl.DataFrame, *, use_external_fixings: bool = True
+    deals: pl.DataFrame, *, use_external_fixings: bool = True, contractual_v2: bool = False
 ) -> NormalizationResult:
     """Нормализовать таблицу reader.read_csv в память, не вычисляя CF.
 
     При use_external_fixings=True для FLOAT очищается base_indicator_rate,
     как в демонстрационном ядре с параметром --fixings. При False исходное
-    значение индикатора сохраняется. Запись CSV/Parquet — задача INP-3.
+    значение индикатора сохраняется. contractual_v2 явно выбирает схему v2.
 
     Returns:
-        deals: 29 строковых колонок в порядке контракта, null — отсутствие.
+        deals: строковые колонки в порядке контракта, null — отсутствие.
         quarantine: исходный deal_id и код причины отклонения.
         portfolio_keys: группировка, нужная для интерпретации ключей.
 
@@ -200,11 +221,12 @@ def normalize_deals(
 
     for row in deals.iter_rows(named=True):
         try:
-            accepted.append(_normalize_row(row, duplicate_ids, portfolio_keys, use_external_fixings))
+            accepted.append(_normalize_row(row, duplicate_ids, portfolio_keys, use_external_fixings, contractual_v2))
         except RowError as exc:
             rejected.append({"deal_id": _cell(row, "deal_id") or None, "reason_code": exc.code})
 
-    text_schema = {name: pl.String for name in OUTPUT_COLUMNS}
+    columns = OUTPUT_COLUMNS_V2 if contractual_v2 else OUTPUT_COLUMNS
+    text_schema = {name: pl.String for name in columns}
     normalized = pl.DataFrame(accepted, schema=text_schema)
     quarantine = pl.DataFrame(rejected, schema={"deal_id": pl.String, "reason_code": pl.String})
     return NormalizationResult(normalized, quarantine, portfolio_keys)

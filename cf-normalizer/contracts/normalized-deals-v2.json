@@ -1,0 +1,31 @@
+{
+  "contract_name": "cf-normalizer-to-cfcore",
+  "version": "2.0.0",
+  "base_contract": "normalized-deals-v1.json",
+  "policy": "contractual-v2",
+  "fields_appended": [
+    {
+      "name": "repricing_final_rate_schedule",
+      "csv_type": "date_amount_list",
+      "parquet_type": "utf8",
+      "nullable": true,
+      "unit": "annual rate as a decimal fraction",
+      "description": "Pairs YYYY-MM-DD,rate separated by ASCII spaces. The value is the final contractual rate before cap/floor; conflicting rates on one date are invalid."
+    },
+    {
+      "name": "indicator_lag_days",
+      "csv_type": "int32",
+      "parquet_type": "int32",
+      "nullable": true,
+      "minimum": 0,
+      "unit": "calendar days",
+      "default_if_null": 0
+    }
+  ],
+  "rules": [
+    "V1 keeps its legacy semantics. V2 requires the explicit contractual-v2 policy for nonempty extension fields.",
+    "FLOAT v1 explicit rate components are ambiguous under CONTRACTUAL_V2 and are rejected.",
+    "An explicit final rate supersedes ordinary repricing on the same date. The next ordinary reset uses the original spread plus the indicator.",
+    "Nonempty source indicator_lag_cd is quarantined under V2 until its code is documented."
+  ]
+}

@@ -8,10 +8,13 @@ import sys
 
 import polars as pl
 
-from normalizer.manual import read_manual_deal
+from normalizer.manual import read_manual_deal_with_policy
 from normalizer.processor import normalize_deals
 from normalizer.reader import read_csv
 from normalizer.writer import write_csv, write_parquet, write_quarantine
+
+
+POLICIES = ("base", "legacy-excel", "contractual-v2")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,7 +30,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trace-deal", type=int, help="вывести deal_trace.csv по instrument_id")
     parser.add_argument("--no-flows", action="store_true", help="не записывать cashflows.csv")
     parser.add_argument("--excel-etalon", action="store_true", help="использовать правила ядра для Excel-эталона")
+    parser.add_argument("--policy", choices=POLICIES, help="расчётная политика, по умолчанию base")
     args = parser.parse_args(argv)
+
+    if args.excel_etalon and args.policy not in (None, "legacy-excel"):
+        parser.error("--excel-etalon несовместим с выбранной политикой")
 
     if args.manual and args.cfcore is None:
         parser.error("--manual требует --cfcore")
@@ -44,8 +51,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"исполняемый файл cfcore не найден: {args.cfcore}")
 
     try:
-        source = read_manual_deal(args.input) if args.manual else read_csv(args.input)
-        result = normalize_deals(source, use_external_fixings=args.fixings is not None)
+        source, manual_policy = read_manual_deal_with_policy(args.input) if args.manual else (read_csv(args.input), None)
+        cli_policy = "legacy-excel" if args.excel_etalon else args.policy
+        if manual_policy is not None and manual_policy not in POLICIES:
+            raise ValueError(f"Неизвестная расчётная политика: {manual_policy}")
+        if cli_policy is not None and manual_policy is not None and cli_policy != manual_policy:
+            raise ValueError("Политики в JSON и CLI должны совпадать")
+        policy = cli_policy or manual_policy
+        result = normalize_deals(source, use_external_fixings=args.fixings is not None,
+                                 contractual_v2=policy == "contractual-v2")
         output_dir = args.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,8 +101,8 @@ def main(argv: list[str] | None = None) -> int:
                 command.extend(["--trace-deal", str(trace_deal)])
             if args.no_flows:
                 command.append("--no-flows")
-            if args.excel_etalon:
-                command.append("--excel-etalon")
+            if policy is not None:
+                command.extend(["--policy", policy])
             print(f"Запуск cfcore; результаты: {core_dir}", flush=True)
             completed = subprocess.run(command, check=False)
             if completed.returncode or not args.manual:

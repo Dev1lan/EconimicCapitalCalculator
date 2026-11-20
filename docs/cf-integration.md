@@ -77,3 +77,7 @@ python3 -m normalizer examples/manual/ann-float.json --manual --output-dir out/m
 - Ручной режим возвращает код 2 при отклонении сделки. Причина нормализации записывается в карантин, а причина отказа ядра — в `core/errors.csv`.
 
 Эталонный режим включается флагом `--excel-etalon`. Рабочие правила для будущего исправления первого купона, исторического fixing и ANN + FLOAT описаны отдельно. [Методология](cf-methodology-decisions.md)
+
+Для расчётной политики CONTRACTUAL_V2 укажите `--policy contractual-v2` в командной строке
+или `"policy": "contractual-v2"` в JSON сделки. Используйте итоговые ставки из [контракта v2](../cf-normalizer/contracts/normalized-deals-v2.json).
+[Пример ANN/FLOAT в V2](../examples/manual/ann-float-v2.json)

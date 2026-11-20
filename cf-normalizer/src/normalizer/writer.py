@@ -1,4 +1,4 @@
-"""Экспорт нормализованных сделок по контракту INP-14 v1."""
+"""Экспорт нормализованных сделок по контракту INP-14."""
 
 import csv
 from datetime import date
@@ -9,7 +9,7 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from normalizer.processor import OUTPUT_COLUMNS
+from normalizer.processor import OUTPUT_COLUMNS, OUTPUT_COLUMNS_V2
 
 
 _REQUIRED = {
@@ -28,13 +28,13 @@ _FLOATS = {
 }
 _INT32 = {
     "portfolio_key", "interest_payment_rule_day_num", "regular_payment_rule_day_num",
-    "repricing_rule_day_num",
+    "repricing_rule_day_num", "indicator_lag_days",
 }
 
 
 def _check_deals(deals: pl.DataFrame) -> None:
-    if tuple(deals.columns) != OUTPUT_COLUMNS:
-        raise ValueError("Колонки или их порядок не соответствуют контракту INP-14 v1")
+    if tuple(deals.columns) not in (OUTPUT_COLUMNS, OUTPUT_COLUMNS_V2):
+        raise ValueError("Колонки или их порядок не соответствуют контракту INP-14")
     for name in _REQUIRED:
         if deals.get_column(name).null_count() or (deals.get_column(name) == "").any():
             raise ValueError(f"Обязательное поле {name} содержит пустые значения")
@@ -51,7 +51,7 @@ def _write_table_csv(data: pl.DataFrame, path: str | Path, *, delimiter: str) ->
 
 
 def write_csv(deals: pl.DataFrame, path: str | Path) -> Path:
-    """Создать CSV из 29 колонок, который умеет читать cfcore::CsvDealReader."""
+    """Создать CSV v1 или v2 для cfcore::CsvDealReader."""
     _check_deals(deals)
     return _write_table_csv(deals, path, delimiter=";")
 
@@ -63,10 +63,10 @@ def write_quarantine(quarantine: pl.DataFrame, path: str | Path) -> Path:
     return _write_table_csv(quarantine, path, delimiter=",")
 
 
-def parquet_schema() -> pa.Schema:
-    """Физическая Arrow/Parquet-схема v1, соответствующая contracts/*.json."""
+def parquet_schema(columns=OUTPUT_COLUMNS) -> pa.Schema:
+    """Физическая Arrow/Parquet-схема выбранного контракта."""
     fields = []
-    for name in OUTPUT_COLUMNS:
+    for name in columns:
         if name == "deal_id":
             dtype = pa.int64()
         elif name in _INT32:
@@ -103,7 +103,7 @@ def _arrow_values(values: list[str | None], dtype: pa.DataType) -> list:
 def write_parquet(deals: pl.DataFrame, path: str | Path) -> Path:
     """Создать типизированную Parquet-проекцию (само C++-ядро её пока не читает)."""
     _check_deals(deals)
-    schema = parquet_schema()
+    schema = parquet_schema(deals.columns)
     arrays = [
         pa.array(_arrow_values(deals.get_column(field.name).to_list(), field.type), type=field.type)
         for field in schema
