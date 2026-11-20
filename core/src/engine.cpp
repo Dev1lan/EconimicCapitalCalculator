@@ -27,16 +27,25 @@ struct ChunkResult {
     std::vector<CashFlow> flows;
     std::vector<DealSummary> summaries;
     std::vector<DealError> errors;
+    std::vector<EventDetail> event_details;
 };
 
 void process_chunk(std::span<const Deal> deals, const DealArena& arena, const Policy& policy,
-                   bool keep_flows, ChunkResult& result) {
+                   const RunOptions& options, ChunkResult& result) {
     std::vector<CashFlow> flows;
+    EventTrace trace;
     Bucketizer bucketizer(deals.front().report_date);
     for (const Deal& deal : deals) {
         flows.clear();
         DealSummary summary;
-        const ErrorCode code = generate_cashflows(deal, arena, policy, flows, &summary);
+        const bool trace_deal = options.trace_deal == deal.instrument_id;
+        EventTrace* deal_trace = nullptr;
+        if (trace_deal || options.keep_repricing) {
+            trace.repricing_only = !trace_deal;
+            trace.rows.clear();
+            deal_trace = &trace;
+        }
+        const ErrorCode code = generate_cashflows(deal, arena, policy, flows, &summary, deal_trace);
         if (code != ErrorCode::Ok) {
             result.errors.push_back({deal.instrument_id, code});
             continue;
@@ -46,8 +55,11 @@ void process_chunk(std::span<const Deal> deals, const DealArena& arena, const Po
         }
         aggregate(deal, flows, bucketizer, result.accumulator);
         result.summaries.push_back(summary);
-        if (keep_flows) {
+        if (options.keep_flows) {
             result.flows.insert(result.flows.end(), flows.begin(), flows.end());
+        }
+        if (deal_trace) {
+            result.event_details.insert(result.event_details.end(), trace.rows.begin(), trace.rows.end());
         }
     }
 }
@@ -144,7 +156,7 @@ PortfolioResult run_portfolio(std::span<const Deal> deals, const DealArena& aren
             for (size_t c = next++; c < chunk_count; c = next++) {
                 const size_t first = c * kChunkSize;
                 const size_t count = std::min(kChunkSize, deals.size() - first);
-                process_chunk(deals.subspan(first, count), arena, policy, options.keep_flows, chunks[c]);
+                process_chunk(deals.subspan(first, count), arena, policy, options, chunks[c]);
             }
         } catch (...) {
             // Системный сбой, например нехватка памяти: передаём его вызывающему коду.
@@ -176,6 +188,8 @@ PortfolioResult run_portfolio(std::span<const Deal> deals, const DealArena& aren
         result.flows.insert(result.flows.end(), chunk.flows.begin(), chunk.flows.end());
         result.summaries.insert(result.summaries.end(), chunk.summaries.begin(), chunk.summaries.end());
         result.errors.insert(result.errors.end(), chunk.errors.begin(), chunk.errors.end());
+        result.event_details.insert(result.event_details.end(), chunk.event_details.begin(),
+                                    chunk.event_details.end());
     }
     std::sort(result.errors.begin(), result.errors.end(),
               [](const DealError& a, const DealError& b) { return a.instrument_id < b.instrument_id; });

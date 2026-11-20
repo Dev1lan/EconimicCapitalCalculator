@@ -8,6 +8,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -34,6 +35,8 @@ struct Arguments {
     bool excel_etalon = false;
     bool write_flows = true;
     bool details_only = false;
+    bool write_events = false;
+    std::optional<int64_t> trace_deal;
     bool round_output = false;
 };
 
@@ -44,6 +47,8 @@ void print_usage() {
         "  --threads N       число потоков, по умолчанию все ядра\n"
         "  --excel-etalon    правила листа \"1 сделка\"\n"
         "  --no-flows        не писать cashflows.csv\n"
+        "  --events          писать events.csv с событиями пересмотра ставки\n"
+        "  --trace-deal ID   писать deal_trace.csv для одной сделки\n"
         "  --details-only    не писать buckets.csv, errors.csv и манифест, без сводки на экране\n"
         "  --round-money     округлить суммы до копеек при выводе\n";
 }
@@ -64,7 +69,17 @@ Arguments parse_arguments(std::span<const std::string> argv) {
         else if (name == "--threads") args.threads = std::stoi(value());
         else if (name == "--excel-etalon") args.excel_etalon = true;
         else if (name == "--no-flows") args.write_flows = false;
-        else if (name == "--details-only") args.details_only = true;
+        else if (name == "--events") args.write_events = true;
+        else if (name == "--trace-deal") {
+            const std::string& text = value();
+            int64_t id = 0;
+            const auto end = text.data() + text.size();
+            const auto result = std::from_chars(text.data(), end, id);
+            if (result.ec != std::errc{} || result.ptr != end) {
+                throw std::runtime_error("неверный instrument_id для --trace-deal: " + text);
+            }
+            args.trace_deal = id;
+        } else if (name == "--details-only") args.details_only = true;
         else if (name == "--round-money") args.round_output = true;
         else throw std::runtime_error("неизвестная опция " + name);
     }
@@ -177,6 +192,42 @@ void write_flows(FILE* file, std::span<const CashFlow> flows, int threads, bool 
     }
 }
 
+const char* event_name(EventType type) {
+    switch (type) {
+        case EventType::InterestPayment: return "INTEREST";
+        case EventType::PrincipalPayment: return "PRINCIPAL";
+        case EventType::RateReset: return "REPRICING";
+    }
+    return "";
+}
+
+const char* rate_source_name(RateSource source) {
+    switch (source) {
+        case RateSource::None: return "";
+        case RateSource::ContractRate: return "CONTRACT_RATE";
+        case RateSource::ContractSchedule: return "CONTRACT_SCHEDULE";
+        case RateSource::FixingHistory: return "FIXING_HISTORY";
+        case RateSource::DealIndicator: return "DEAL_INDICATOR";
+    }
+    return "";
+}
+
+void write_repricing(FILE* file, const EventDetail& event) {
+    std::fprintf(file, "%lld,%s,REPRICING,%.17g,%.17g,%s,0\n",
+                 static_cast<long long>(event.instrument_id), format_date(event.date).c_str(),
+                 event.rate_before, event.rate_after, rate_source_name(event.rate_source));
+}
+
+void write_trace(FILE* file, const EventDetail& event) {
+    std::fprintf(file, "%lld,%s,%s,%s,%s,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%s,%.17g,%.17g,%.17g,%.17g\n",
+                 static_cast<long long>(event.instrument_id), format_date(event.date).c_str(),
+                 event_name(event.type), format_date(event.period_start).c_str(),
+                 format_date(event.period_end).c_str(), event.period_end - event.period_start,
+                 event.year_fraction, event.balance_before, event.balance_after, event.rate_before,
+                 event.rate_after, rate_source_name(event.rate_source), event.interest_accrued,
+                 event.interest_paid, event.principal_paid, event.interest_paid + event.principal_paid);
+}
+
 const char* side_name(Side side) {
     return side == Side::Asset ? "ASSET" : "LIABILITY";
 }
@@ -203,6 +254,20 @@ int run_cli(std::span<const std::string> argv) {
             std::fprintf(flows_file.get(),
                          "instrument_id,payment_date,cash_flow_type,amount,rate_used,year_fraction\n");
         }
+        File events_file(nullptr, std::fclose);
+        if (args.write_events) {
+            events_file = open_output(out_dir / "events.csv");
+            std::fprintf(events_file.get(),
+                         "instrument_id,event_date,event_type,rate_before,rate_after,rate_source,cash_amount\n");
+        }
+        File trace_file(nullptr, std::fclose);
+        if (args.trace_deal) {
+            trace_file = open_output(out_dir / "deal_trace.csv");
+            std::fprintf(trace_file.get(),
+                         "instrument_id,event_date,event_type,period_start,period_end,days,year_fraction,"
+                         "balance_before,balance_after,rate_before,rate_after,rate_source,interest_accrued,"
+                         "interest_paid,principal_paid,cash_amount\n");
+        }
         File summary_file = open_output(out_dir / "deal_summary.csv");
         std::fprintf(summary_file.get(),
                      "instrument_id,opening_principal,total_principal,total_interest,closing_balance,"
@@ -221,6 +286,8 @@ int run_cli(std::span<const std::string> argv) {
         RunOptions options;
         options.threads = threads;
         options.keep_flows = args.write_flows;
+        options.keep_repricing = args.write_events;
+        options.trace_deal = args.trace_deal;
 
         // Порция считается, результат записывается, память порции переиспользуется.
         while (reader.next_batch(kBatchSize, deals, arena, errors)) {
@@ -230,6 +297,14 @@ int run_cli(std::span<const std::string> argv) {
             deals_ok += result.summaries.size();
             if (args.write_flows) {
                 write_flows(flows_file.get(), result.flows, threads, args.round_output);
+            }
+            for (const EventDetail& event : result.event_details) {
+                if (events_file && event.type == EventType::RateReset) {
+                    write_repricing(events_file.get(), event);
+                }
+                if (trace_file && args.trace_deal == event.instrument_id) {
+                    write_trace(trace_file.get(), event);
+                }
             }
             for (const DealSummary& s : result.summaries) {
                 flow_count += s.flow_count;

@@ -96,9 +96,16 @@ private:
     std::map<BucketKey, Sums> sums_;
 };
 
+struct EventTrace {
+    bool repricing_only = false;
+    std::vector<EventDetail> rows;
+};
+
 struct RunOptions {
     int threads = 1;
     bool keep_flows = false;
+    bool keep_repricing = false;
+    std::optional<int64_t> trace_deal = std::nullopt;
 };
 
 struct PortfolioResult {
@@ -106,14 +113,15 @@ struct PortfolioResult {
     std::vector<CashFlow> flows;  // только при keep_flows
     std::vector<DealSummary> summaries;
     std::vector<DealError> errors;
+    std::vector<EventDetail> event_details;
 };
 
 ErrorCode validate(const Deal& deal, const DealArena& arena);
 
-// Дополняет out потоками сделки. При ошибке out не меняется.
+// Дополняет out потоками сделки и при запросе пишет события в trace. При ошибке оба не меняются.
 ErrorCode generate_cashflows(const Deal& deal, const DealArena& arena,
                              const Policy& policy, std::vector<CashFlow>& out,
-                             DealSummary* summary = nullptr);
+                             DealSummary* summary = nullptr, EventTrace* trace = nullptr);
 
 void aggregate(const Deal& deal, std::span<const CashFlow> flows,
                const Bucketizer& bucketizer, Accumulator& accumulator);

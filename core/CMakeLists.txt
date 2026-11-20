@@ -66,6 +66,8 @@ if(Python3_Interpreter_FOUND)
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py" "$<TARGET_FILE:cfcore_cli>")
   add_test(NAME Cli.PathsAndManifest COMMAND ${CFCORE_CLI_TEST_COMMAND}
     Cli.test_unicode_paths_and_manifest Cli.test_manifest_round_trips_native_path)
+  add_test(NAME Cli.RepricingAndTrace COMMAND ${CFCORE_CLI_TEST_COMMAND}
+    Cli.test_repricing_reports_keep_financial_exports_identical Cli.test_trace_records_implicit_final_interest)
   if(NOT WIN32)
     add_test(NAME Cli.ManifestEscapesSpecialCharacters COMMAND ${CFCORE_CLI_TEST_COMMAND}
       Cli.test_manifest_escapes_quotes_backslashes_and_controls)

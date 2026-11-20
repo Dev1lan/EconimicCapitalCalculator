@@ -10,22 +10,32 @@ namespace cfcore {
 namespace {
 
 // Значение индикатора. До даты отчёта берём историю, дальше последнее известное значение.
-std::optional<double> indicator_on(const Deal& deal, const DealArena& arena, Date date) {
+std::optional<double> indicator_on(const Deal& deal, const DealArena& arena, Date date,
+                                   RateSource* source) {
     if ((date <= deal.report_date || !deal.indicator_rate) && !arena.indicator_fixings.empty()) {
         const Date known_on = std::min(date, deal.report_date);
         if (const auto value = last_known_rate(arena.indicator_fixings, known_on)) {
+            if (source) {
+                *source = RateSource::FixingHistory;
+            }
             return value;
         }
+    }
+    if (source && deal.indicator_rate) {
+        *source = RateSource::DealIndicator;
     }
     return deal.indicator_rate;
 }
 
 std::optional<double> rate_on(const Deal& deal, const DealArena& arena, const Policy& policy,
-                              double component, Date date) {
+                              double component, Date date, RateSource* source = nullptr) {
     if (deal.rate_type == RateType::Fixed) {
+        if (source) {
+            *source = RateSource::ContractRate;
+        }
         return effective_rate(component, deal.floor, deal.cap);
     }
-    const std::optional<double> indicator = indicator_on(deal, arena, date);
+    const std::optional<double> indicator = indicator_on(deal, arena, date, source);
     if (!indicator) {
         return std::nullopt;
     }
@@ -37,7 +47,7 @@ std::optional<double> rate_on(const Deal& deal, const DealArena& arena, const Po
 // поэтому погашение между процентными датами сразу меняет базу начисления.
 ErrorCode settle(const Deal& deal, const DealArena& arena, const Policy& policy,
                  const std::vector<Event>& events, const internal::ScheduleInfo& info,
-                 double start_rate, std::vector<CashFlow>& out, double& balance_out) {
+                 double start_rate, std::vector<CashFlow>& out, double& balance_out, EventTrace* trace) {
     const DayCount day_count = policy.force_act365 ? DayCount::Act365 : deal.day_count;
     const bool annuity = deal.amortization == AmortizationType::ANN;
 
@@ -60,23 +70,33 @@ ErrorCode settle(const Deal& deal, const DealArena& arena, const Policy& policy,
     }
 
     const auto pay_interest = [&](Date date) {
-        if (accrued > 0.0) {
-            out.push_back({deal.instrument_id, date, FlowType::Interest, accrued, rate, accrued_fraction});
+        const double paid = accrued > 0.0 ? accrued : 0.0;
+        if (paid > 0.0) {
+            out.push_back({deal.instrument_id, date, FlowType::Interest, paid, rate, accrued_fraction});
         }
         last_interest = accrued;
         accrued = 0.0;
         accrued_fraction = 0.0;
+        return paid;
     };
 
     for (const Event& event : events) {
+        const Date period_start = accrual_from;
+        const double balance_before = balance;
+        const double rate_before = rate;
         const double fraction = year_fraction(accrual_from, event.date, day_count);
-        accrued += interest_amount(balance, rate, fraction);
+        const double interest_accrued = interest_amount(balance, rate, fraction);
+        accrued += interest_accrued;
         accrued_fraction += fraction;
         accrual_from = std::max(accrual_from, event.date);
 
+        const bool record = trace && (!trace->repricing_only || event.type == EventType::RateReset);
+        RateSource source = RateSource::None;
+        double interest_paid = 0.0;
+        double principal_paid = 0.0;
         switch (event.type) {
             case EventType::InterestPayment:
-                pay_interest(event.date);
+                interest_paid = pay_interest(event.date);
                 break;
             case EventType::PrincipalPayment: {
                 --principal_left;
@@ -84,9 +104,9 @@ ErrorCode settle(const Deal& deal, const DealArena& arena, const Policy& policy,
                 if (principal_left == 0 && policy.close_residual) {
                     amount = balance;
                 }
-                const double paid = apply_principal(balance, amount);
-                if (paid > 0.0) {
-                    out.push_back({deal.instrument_id, event.date, FlowType::Principal, paid, 0.0, 0.0});
+                principal_paid = apply_principal(balance, amount);
+                if (principal_paid > 0.0) {
+                    out.push_back({deal.instrument_id, event.date, FlowType::Principal, principal_paid, 0.0, 0.0});
                 }
                 break;
             }
@@ -94,9 +114,14 @@ ErrorCode settle(const Deal& deal, const DealArena& arena, const Policy& policy,
                 if (event.amount) {
                     component = *event.amount;
                 }
-                const auto new_rate = rate_on(deal, arena, policy, component, event.date);
+                const auto new_rate = rate_on(deal, arena, policy, component, event.date,
+                                              record ? &source : nullptr);
                 if (!new_rate) {
                     return ErrorCode::MissingRate;
+                }
+                if (record && event.amount &&
+                    (deal.rate_type == RateType::Fixed || policy.float_rate_is_spread)) {
+                    source = RateSource::ContractSchedule;
                 }
                 // Новая ставка меняет размер оставшихся платежей аннуитета.
                 if (annuity && *new_rate != rate && event.date > deal.report_date && principal_left > 0) {
@@ -106,9 +131,19 @@ ErrorCode settle(const Deal& deal, const DealArena& arena, const Policy& policy,
                 break;
             }
         }
+        if (record) {
+            trace->rows.push_back({deal.instrument_id, event.date, event.type, period_start, accrual_from,
+                                   fraction, balance_before, balance, rate_before, rate, source,
+                                   interest_accrued, interest_paid, principal_paid});
+        }
     }
     // ДОПУЩЕНИЕ: проценты после последней процентной даты выплачиваются с последним событием.
-    pay_interest(accrual_from);
+    const double final_interest = pay_interest(accrual_from);
+    if (trace && !trace->repricing_only && final_interest > 0.0) {
+        trace->rows.push_back({deal.instrument_id, accrual_from, EventType::InterestPayment,
+                               accrual_from, accrual_from, 0.0, balance, balance, rate, rate,
+                               RateSource::None, 0.0, final_interest, 0.0});
+    }
     balance_out = balance;
     return ErrorCode::Ok;
 }
@@ -132,7 +167,7 @@ void fill_current_interest(const Deal& deal, const internal::ScheduleInfo& info,
 }  // namespace
 
 ErrorCode generate_cashflows(const Deal& deal, const DealArena& arena, const Policy& policy,
-                             std::vector<CashFlow>& out, DealSummary* summary) {
+                             std::vector<CashFlow>& out, DealSummary* summary, EventTrace* trace) {
     static thread_local std::vector<Event> events;
 
     if (ErrorCode code = validate(deal, arena); code != ErrorCode::Ok) {
@@ -148,8 +183,9 @@ ErrorCode generate_cashflows(const Deal& deal, const DealArena& arena, const Pol
     }
 
     const size_t first = out.size();
+    const size_t first_event = trace ? trace->rows.size() : 0;
     double closing_balance = 0.0;
-    ErrorCode code = settle(deal, arena, policy, events, info, *start_rate, out, closing_balance);
+    ErrorCode code = settle(deal, arena, policy, events, info, *start_rate, out, closing_balance, trace);
 
     double total_principal = 0.0;
     double total_interest = 0.0;
@@ -164,6 +200,9 @@ ErrorCode generate_cashflows(const Deal& deal, const DealArena& arena, const Pol
     }
     if (code != ErrorCode::Ok) {
         out.resize(first);
+        if (trace) {
+            trace->rows.resize(first_event);
+        }
         return code;
     }
     if (summary != nullptr) {
