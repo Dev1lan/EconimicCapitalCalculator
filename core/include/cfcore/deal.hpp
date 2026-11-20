@@ -59,6 +59,7 @@ struct DealArena {
     std::vector<PrincipalItem> principal_items;
     std::vector<ResetItem> reset_items;
     std::vector<RateFixing> indicator_fixings;  // по возрастанию даты
+    bool external_fixings = false;
 };
 
 // Внутренняя модель сделки. Не зависит от названий колонок CSV и Parquet:
@@ -91,6 +92,9 @@ struct Deal {
     Span interest_schedule;
     Span principal_schedule;
     Span reset_schedule;
+    Span final_rate_schedule;
+    std::optional<int32_t> indicator_lag_days;
+    bool unsupported_indicator_lag = false;
 };
 
 }  // namespace cfcore

@@ -14,6 +14,7 @@ struct ScheduleInfo {
     Date last_interest_date = 0;  // последняя процентная дата не позже отчёта
     bool has_past_interest = false;  // такая дата есть в графике
     int principal_events = 0;
+    std::optional<ResetItem> initial_reset;
     double rate_component = 0.0;  // ставка сделки на начало начисления
 };
 

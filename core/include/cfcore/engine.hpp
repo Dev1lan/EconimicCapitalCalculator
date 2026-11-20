@@ -25,6 +25,11 @@ enum class ErrorCode : uint8_t {
     TooManyEvents,
     NonFiniteResult,      // в расчёте появился NaN или бесконечность
     ParseError,           // строка входного файла не разобрана
+    ConflictingRepricingRates,
+    AmbiguousRateSchedule,
+    InvalidIndicatorLag,
+    UnsupportedIndicatorLag,
+    InterestExceedsAnnuity,
 };
 
 const char* to_string(ErrorCode code);

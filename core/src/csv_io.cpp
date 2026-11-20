@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -215,7 +216,9 @@ CsvDealReader::CsvDealReader(const std::string& path) : file_(path_from_utf8(pat
     read_line(file_, header);
     const auto names = split(header, kDelimiter);
     for (size_t i = 0; i < names.size(); ++i) {
-        columns_[names[i]] = i;
+        if (!columns_.emplace(names[i], i).second) {
+            throw std::runtime_error("повторяющаяся колонка: " + names[i]);
+        }
     }
     for (const char* column : kRequiredColumns) {
         if (columns_.count(column) == 0) {
@@ -240,7 +243,11 @@ bool CsvDealReader::next_batch(size_t max_deals, std::vector<Deal>& deals, DealA
         read_any = true;
         auto cells = split(line, kDelimiter);
         cells.resize(columns_.size());
-        const auto cell = [&](const char* name) -> const std::string& { return cells[columns_.at(name)]; };
+        const std::string empty;
+        const auto cell = [&](const char* name) -> const std::string& {
+            const auto column = columns_.find(name);
+            return column == columns_.end() ? empty : cells[column->second];
+        };
 
         Deal deal;
         // Даже без остальных полей ошибка должна указывать на сделку.
@@ -277,11 +284,27 @@ bool CsvDealReader::next_batch(size_t max_deals, std::vector<Deal>& deals, DealA
             deal.reset_rule = parse_rule(cell("repricing_rule_start_dttm"),
                                          cell("repricing_rule_period_cd"),
                                          cell("repricing_rule_day_num"), deal.start_date);
+            const auto& lag = cell("indicator_lag_days");
+            if (!lag.empty()) {
+                try {
+                    const int64_t days = require_int(lag);
+                    if (days < 0 || days > std::numeric_limits<int32_t>::max()) {
+                        throw RowError{};
+                    }
+                    deal.indicator_lag_days = static_cast<int32_t>(days);
+                } catch (const RowError&) {
+                    errors.push_back({deal.instrument_id, ErrorCode::InvalidIndicatorLag});
+                    continue;
+                }
+            }
+            deal.unsupported_indicator_lag = !cell("indicator_lag_cd").empty();
             deal.interest_schedule = parse_dates(cell("interest_payment"), arena.interest_dates);
             deal.principal_schedule = parse_principal(cell("principal_payment"), arena.principal_items);
             deal.reset_schedule = parse_resets(cell("repricing_dttm_schedule"),
                                                cell("repricing_dttm_rate_schedule_fixed"),
                                                arena.reset_items);
+            deal.final_rate_schedule = parse_resets("", cell("repricing_final_rate_schedule"),
+                                                    arena.reset_items);
             deals.push_back(deal);
         } catch (const RowError&) {
             arena.interest_dates.resize(interest_size);

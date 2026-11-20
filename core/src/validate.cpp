@@ -63,7 +63,8 @@ ErrorCode check_numbers(const Deal& deal) {
 ErrorCode check_lists(const Deal& deal, const DealArena& arena) {
     if (!span_in_arena(deal.interest_schedule, arena.interest_dates) ||
         !span_in_arena(deal.principal_schedule, arena.principal_items) ||
-        !span_in_arena(deal.reset_schedule, arena.reset_items)) {
+        !span_in_arena(deal.reset_schedule, arena.reset_items) ||
+        !span_in_arena(deal.final_rate_schedule, arena.reset_items)) {
         return ErrorCode::InvalidSchedule;
     }
     Date previous = kMinDate;
@@ -92,13 +93,14 @@ ErrorCode check_lists(const Deal& deal, const DealArena& arena) {
         }
         previous = item.date;
     }
-    for (const ResetItem& item : std::span(arena.reset_items)
-                                     .subspan(deal.reset_schedule.offset, deal.reset_schedule.length)) {
-        if (!date_in_range(item.date)) {
-            return ErrorCode::InvalidDate;
-        }
-        if (!optional_finite(item.fixed_rate)) {
-            return ErrorCode::InvalidNumber;
+    for (const Span span : {deal.reset_schedule, deal.final_rate_schedule}) {
+        for (const ResetItem& item : std::span(arena.reset_items).subspan(span.offset, span.length)) {
+            if (!date_in_range(item.date)) {
+                return ErrorCode::InvalidDate;
+            }
+            if (!optional_finite(item.fixed_rate)) {
+                return ErrorCode::InvalidNumber;
+            }
         }
     }
     return ErrorCode::Ok;

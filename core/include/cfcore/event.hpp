@@ -35,6 +35,11 @@ struct EventDetail {
     double interest_accrued = 0.0;
     double interest_paid = 0.0;
     double principal_paid = 0.0;
+    RateSource rate_source_before = RateSource::None;
+    std::optional<Date> last_repricing_date;
+    std::optional<double> accrued_interest_included;
+    std::optional<double> pmt_before;
+    std::optional<double> pmt_after;
 };
 
 enum class FlowType : uint8_t { Principal, Interest };

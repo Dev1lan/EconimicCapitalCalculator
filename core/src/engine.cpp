@@ -79,6 +79,11 @@ const char* to_string(ErrorCode code) {
         case ErrorCode::TooManyEvents: return "TOO_MANY_EVENTS";
         case ErrorCode::NonFiniteResult: return "NON_FINITE_RESULT";
         case ErrorCode::ParseError: return "PARSE_ERROR";
+        case ErrorCode::ConflictingRepricingRates: return "CONFLICTING_REPRICING_RATES";
+        case ErrorCode::AmbiguousRateSchedule: return "AMBIGUOUS_RATE_SCHEDULE";
+        case ErrorCode::InvalidIndicatorLag: return "INVALID_INDICATOR_LAG";
+        case ErrorCode::UnsupportedIndicatorLag: return "UNSUPPORTED_INDICATOR_LAG";
+        case ErrorCode::InterestExceedsAnnuity: return "INTEREST_EXCEEDS_ANNUITY";
     }
     return "UNKNOWN";
 }

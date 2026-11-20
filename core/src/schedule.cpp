@@ -1,6 +1,7 @@
 #include "internal/schedule.hpp"
 
 #include <algorithm>
+#include <map>
 #include <span>
 
 #include "cfcore/date.hpp"
@@ -172,6 +173,58 @@ ErrorCode add_reset_events(const Deal& deal, const DealArena& arena, std::vector
     return code;
 }
 
+ErrorCode add_contractual_resets(const Deal& deal, const DealArena& arena,
+                                 std::vector<Event>& events, ScheduleInfo& info) {
+    std::map<Date, std::optional<double>> resets;
+    for (const bool is_final : {false, true}) {
+        const Span span = is_final ? deal.final_rate_schedule : deal.reset_schedule;
+        for (const auto& item : std::span(arena.reset_items).subspan(span.offset, span.length)) {
+            if (deal.rate_type == RateType::Float && !is_final && item.fixed_rate) {
+                return ErrorCode::AmbiguousRateSchedule;
+            }
+            if (item.date < deal.start_date || item.date > deal.maturity_date) {
+                if (is_final) {
+                    return ErrorCode::InvalidSchedule;
+                }
+                continue;
+            }
+            auto& value = resets[item.date];
+            if (value && item.fixed_rate && *value != *item.fixed_rate) {
+                return ErrorCode::ConflictingRepricingRates;
+            }
+            if (item.fixed_rate) {
+                value = item.fixed_rate;
+            }
+        }
+    }
+
+    std::vector<Date> dates;
+    Date previous = 0;
+    bool has_previous = false;
+    const auto code = rule_dates(deal.reset_rule, info.accrual_start, deal.maturity_date,
+                                 dates, previous, has_previous);
+    if (code != ErrorCode::Ok) {
+        return code;
+    }
+    if (has_previous && previous >= deal.start_date && deal.rate_type == RateType::Float) {
+        resets.try_emplace(previous);
+    }
+    for (const Date date : dates) {
+        resets.try_emplace(date);
+    }
+    for (const auto& [date, rate] : resets) {
+        if (date == deal.maturity_date) {
+            break;
+        }
+        if (date > info.accrual_start) {
+            events.push_back({date, EventType::RateReset, rate});
+        } else if (rate || deal.rate_type == RateType::Float) {
+            info.initial_reset = ResetItem{date, rate};
+        }
+    }
+    return ErrorCode::Ok;
+}
+
 }  // namespace
 
 ErrorCode build_events(const Deal& deal, const DealArena& arena, const Policy& policy,
@@ -220,11 +273,12 @@ ErrorCode build_events(const Deal& deal, const DealArena& arena, const Policy& p
                               : deal.start_date;
     info.has_past_interest = interest.has_previous;
     info.last_interest_date = previous;
-    info.accrual_start = policy.first_period_from_prev_pay
+    info.accrual_start = !policy.is_contractual_v2() && policy.first_period_from_prev_pay
                              ? previous
                              : std::max(deal.report_date, deal.start_date);
 
-    code = add_reset_events(deal, arena, events, info);
+    code = policy.is_contractual_v2() ? add_contractual_resets(deal, arena, events, info)
+                                      : add_reset_events(deal, arena, events, info);
     if (code != ErrorCode::Ok) {
         return code;
     }

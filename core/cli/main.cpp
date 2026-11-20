@@ -32,7 +32,7 @@ struct Arguments {
     std::string output_dir;
     std::string fixings;
     int threads = 0;
-    bool excel_etalon = false;
+    std::optional<Policy::Mode> mode;
     bool write_flows = true;
     bool details_only = false;
     bool write_events = false;
@@ -46,6 +46,7 @@ void print_usage() {
         "  --fixings FILE    история индикатора (date,value)\n"
         "  --threads N       число потоков, по умолчанию все ядра\n"
         "  --excel-etalon    правила листа \"1 сделка\"\n"
+        "  --policy NAME     base, legacy-excel или contractual-v2\n"
         "  --no-flows        не писать cashflows.csv\n"
         "  --events          писать events.csv с событиями пересмотра ставки\n"
         "  --trace-deal ID   писать deal_trace.csv для одной сделки\n"
@@ -55,6 +56,12 @@ void print_usage() {
 
 Arguments parse_arguments(std::span<const std::string> argv) {
     Arguments args;
+    const auto set_mode = [&](Policy::Mode mode) {
+        if (args.mode && *args.mode != mode) {
+            throw std::runtime_error("заданы несовместимые расчётные политики");
+        }
+        args.mode = mode;
+    };
     for (size_t i = 1; i < argv.size(); ++i) {
         const std::string& name = argv[i];
         const auto value = [&]() -> const std::string& {
@@ -67,8 +74,14 @@ Arguments parse_arguments(std::span<const std::string> argv) {
         else if (name == "--output-dir") args.output_dir = value();
         else if (name == "--fixings") args.fixings = value();
         else if (name == "--threads") args.threads = std::stoi(value());
-        else if (name == "--excel-etalon") args.excel_etalon = true;
-        else if (name == "--no-flows") args.write_flows = false;
+        else if (name == "--excel-etalon") set_mode(Policy::Mode::LegacyExcel);
+        else if (name == "--policy") {
+            const auto& text = value();
+            if (text == "base") set_mode(Policy::Mode::Base);
+            else if (text == "legacy-excel") set_mode(Policy::Mode::LegacyExcel);
+            else if (text == "contractual-v2") set_mode(Policy::Mode::ContractualV2);
+            else throw std::runtime_error("неизвестная расчётная политика: " + text);
+        } else if (name == "--no-flows") args.write_flows = false;
         else if (name == "--events") args.write_events = true;
         else if (name == "--trace-deal") {
             const std::string& text = value();
@@ -219,13 +232,24 @@ void write_repricing(FILE* file, const EventDetail& event) {
 }
 
 void write_trace(FILE* file, const EventDetail& event) {
-    std::fprintf(file, "%lld,%s,%s,%s,%s,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%s,%.17g,%.17g,%.17g,%.17g\n",
+    std::fprintf(file, "%lld,%s,%s,%s,%s,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%s,%.17g,%.17g,%.17g,%.17g",
                  static_cast<long long>(event.instrument_id), format_date(event.date).c_str(),
                  event_name(event.type), format_date(event.period_start).c_str(),
                  format_date(event.period_end).c_str(), event.period_end - event.period_start,
                  event.year_fraction, event.balance_before, event.balance_after, event.rate_before,
                  event.rate_after, rate_source_name(event.rate_source), event.interest_accrued,
                  event.interest_paid, event.principal_paid, event.interest_paid + event.principal_paid);
+    std::fprintf(file, ",%s,", rate_source_name(event.rate_source_before));
+    if (event.last_repricing_date) {
+        std::fputs(format_date(*event.last_repricing_date).c_str(), file);
+    }
+    for (const auto& value : {event.accrued_interest_included, event.pmt_before, event.pmt_after}) {
+        std::fputc(',', file);
+        if (value) {
+            std::fprintf(file, "%.17g", *value);
+        }
+    }
+    std::fputc('\n', file);
 }
 
 const char* side_name(Side side) {
@@ -242,7 +266,11 @@ int run_cli(std::span<const std::string> argv) {
         const Arguments args = parse_arguments(argv);
         const int threads = args.threads > 0 ? args.threads
                                              : static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-        const Policy policy = args.excel_etalon ? Policy::excel_etalon() : Policy{};
+        const bool excel = args.mode == Policy::Mode::LegacyExcel;
+        const bool contractual = args.mode == Policy::Mode::ContractualV2;
+        const Policy policy = contractual ? Policy::contractual_v2() : excel ? Policy::excel_etalon() : Policy{};
+        const char* mode = contractual ? "CONTRACTUAL_V2" : excel ? "EXCEL_ETALON" : "BASE";
+        const char* policy_name = excel ? "LEGACY_EXCEL" : mode;
         const auto money = [&](double value) { return args.round_output ? round_money(value) : value; };
 
         const std::filesystem::path out_dir(std::u8string(args.output_dir.begin(), args.output_dir.end()));
@@ -266,7 +294,8 @@ int run_cli(std::span<const std::string> argv) {
             std::fprintf(trace_file.get(),
                          "instrument_id,event_date,event_type,period_start,period_end,days,year_fraction,"
                          "balance_before,balance_after,rate_before,rate_after,rate_source,interest_accrued,"
-                         "interest_paid,principal_paid,cash_amount\n");
+                         "interest_paid,principal_paid,cash_amount,rate_source_before,last_repricing_date,"
+                         "accrued_interest_included,pmt_before,pmt_after\n");
         }
         File summary_file = open_output(out_dir / "deal_summary.csv");
         std::fprintf(summary_file.get(),
@@ -276,6 +305,7 @@ int run_cli(std::span<const std::string> argv) {
         DealArena arena;
         if (!args.fixings.empty()) {
             arena.indicator_fixings = read_fixings(args.fixings);
+            arena.external_fixings = true;
         }
 
         CsvDealReader reader(args.input);
@@ -358,12 +388,12 @@ int run_cli(std::span<const std::string> argv) {
         const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - started;
         File manifest = open_output(out_dir / "run_manifest.json");
         std::fprintf(manifest.get(),
-                     "{\n  \"input\": %s,\n  \"mode\": \"%s\",\n  \"threads\": %d,\n"
+                     "{\n  \"input\": %s,\n  \"mode\": \"%s\",\n  \"calculation_policy\": \"%s\",\n  \"threads\": %d,\n"
                      "  \"deals_ok\": %zu,\n  \"deals_failed\": %zu,\n  \"flows\": %zu,\n"
                      "  \"seconds\": %.3f,\n  \"policy\": {\n    \"force_act365\": %s,\n"
                      "    \"close_residual\": %s,\n    \"first_period_from_prev_pay\": %s,\n"
                      "    \"include_payment_on_report\": %s,\n    \"float_rate_is_spread\": %s\n  }\n}\n",
-                     json_string(args.input).c_str(), args.excel_etalon ? "EXCEL_ETALON" : "BASE", threads, deals_ok,
+                     json_string(args.input).c_str(), mode, policy_name, threads, deals_ok,
                      errors.size(), flow_count, elapsed.count(), policy.force_act365 ? "true" : "false",
                      policy.close_residual ? "true" : "false",
                      policy.first_period_from_prev_pay ? "true" : "false",
