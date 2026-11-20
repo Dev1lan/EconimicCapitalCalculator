@@ -1,6 +1,7 @@
 #include "cfcore/csv_io.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
@@ -297,11 +298,19 @@ std::vector<RateFixing> read_fixings(const std::string& path) {
     read_line(file, line);
     while (read_line(file, line)) {
         const auto parts = split(line, ',');
-        Date date = 0;
-        if (parts.size() != 2 || !parse_date(parts[0], date)) {
+        try {
+            if (parts.size() != 2) {
+                throw RowError{};
+            }
+            const Date date = require_date(parts[0]);
+            const double value = require_double(parts[1]);
+            if (!std::isfinite(value)) {
+                throw RowError{};
+            }
+            fixings.push_back({date, value});
+        } catch (const RowError&) {
             throw std::runtime_error("неверная строка истории ставки: " + line);
         }
-        fixings.push_back({date, std::strtod(parts[1].c_str(), nullptr)});
     }
     if (!std::is_sorted(fixings.begin(), fixings.end(),
                         [](const RateFixing& a, const RateFixing& b) { return a.date < b.date; })) {

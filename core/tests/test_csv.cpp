@@ -177,6 +177,24 @@ TEST(Csv, MissingColumnStopsRun) {
     EXPECT_THROW(CsvDealReader{file.path()}, std::runtime_error);
 }
 
+TEST(Fixings, RejectsMalformedValues) {
+    for (const char* value : {"NaN", "Inf", "oops", "0.08junk", ""}) {
+        SCOPED_TRACE(std::string("fixing value: '") + value + "'");
+        const TempFile file(std::string("date,value\n2022-08-31,") + value + "\n");
+        EXPECT_THROW(read_fixings(file.path()), std::runtime_error);
+    }
+}
+
+TEST(Fixings, ReadsZeroAndNonzeroValues) {
+    const TempFile file("date,value\n2022-08-30,0.08\n2022-08-31,0\n");
+    const auto fixings = read_fixings(file.path());
+    ASSERT_EQ(fixings.size(), 2u);
+    EXPECT_EQ(fixings[0].date, from_ymd(2022, 8, 30));
+    EXPECT_DOUBLE_EQ(fixings[0].value, 0.08);
+    EXPECT_EQ(fixings[1].date, from_ymd(2022, 8, 31));
+    EXPECT_DOUBLE_EQ(fixings[1].value, 0.0);
+}
+
 TEST(Date, ParseAndFormatRoundTrip) {
     Date date = 0;
     ASSERT_TRUE(parse_date("2024-02-29", date));
