@@ -147,6 +147,19 @@ TEST(Simple, PastItemsDoNotCountAgainstBalance) {
     EXPECT_EQ(only(flows_of(deal, arena), FlowType::Principal).size(), 1u);
 }
 
+TEST(Simple, RejectsPrincipalPaymentAfterMaturity) {
+    Deal deal = base_deal(AmortizationType::SIMPLE);
+    deal.principal_schedule = {0, 1};
+    DealArena arena;
+    arena.principal_items = {{deal.maturity_date + 1, deal.outstanding_principal}};
+
+    EXPECT_EQ(validate(deal, arena), ErrorCode::InvalidSchedule);
+
+    std::vector<CashFlow> flows;
+    EXPECT_EQ(generate_cashflows(deal, arena, Policy{}, flows), ErrorCode::InvalidSchedule);
+    EXPECT_TRUE(flows.empty());
+}
+
 TEST(Simple, RejectsScheduleLargerThanBalance) {
     Deal deal = base_deal(AmortizationType::SIMPLE);
     deal.principal_rule = PaymentRule{};

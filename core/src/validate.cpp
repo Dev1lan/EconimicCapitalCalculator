@@ -86,7 +86,8 @@ ErrorCode check_lists(const Deal& deal, const DealArena& arena) {
         if (!std::isfinite(item.amount) || item.amount < 0.0) {
             return ErrorCode::InvalidNumber;
         }
-        if (item.date < previous) {
+        if (item.date < previous ||
+            (deal.amortization == AmortizationType::SIMPLE && item.date > deal.maturity_date)) {
             return ErrorCode::InvalidSchedule;
         }
         previous = item.date;
