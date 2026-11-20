@@ -1,0 +1,3 @@
+# Scripts are also run with Bash from Windows checkouts.
+cf text eol=lf
+tools/*.sh text eol=lf

@@ -19,7 +19,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cfcore", type=Path, help="путь к собранному C++-исполняемому файлу cfcore")
     parser.add_argument("--fixings", type=Path, help="история индикатора в формате date,value")
     parser.add_argument("--threads", type=int, help="число потоков для cfcore")
+    parser.add_argument("--events", action="store_true", help="вывести events.csv с пересмотрами ставки")
+    parser.add_argument("--trace-deal", type=int, help="вывести deal_trace.csv по instrument_id")
+    parser.add_argument("--no-flows", action="store_true", help="не записывать cashflows.csv")
+    parser.add_argument("--excel-etalon", action="store_true", help="использовать правила ядра для Excel-эталона")
     args = parser.parse_args(argv)
+
+    if args.cfcore is None and (args.events or args.trace_deal is not None or args.no_flows or args.excel_etalon):
+        parser.error("параметры вывода и режима ядра требуют --cfcore")
 
     if args.cfcore and args.format == "parquet":
         parser.error("cfcore пока читает только CSV; используйте --format csv или both")
@@ -57,6 +64,14 @@ def main(argv: list[str] | None = None) -> int:
                 command.extend(["--fixings", str(args.fixings.resolve())])
             if args.threads is not None:
                 command.extend(["--threads", str(args.threads)])
+            if args.events:
+                command.append("--events")
+            if args.trace_deal is not None:
+                command.extend(["--trace-deal", str(args.trace_deal)])
+            if args.no_flows:
+                command.append("--no-flows")
+            if args.excel_etalon:
+                command.append("--excel-etalon")
             print(f"Запуск cfcore; результаты: {core_dir}", flush=True)
             return subprocess.run(command, check=False).returncode
     except (OSError, ValueError, subprocess.SubprocessError, pl.exceptions.PolarsError) as exc:

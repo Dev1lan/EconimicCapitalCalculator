@@ -1,8 +1,7 @@
 """INP-4: необязательный регрессионный прогон настоящего C++-ядра.
 
-CFCORE_BIN и CFCORE_FIXINGS указывают на бинарник и исторические ставки
-из Dev1lan/EconimicCapitalCalculator (develop/core, commit 6fa3b5c).
-Без них тест пропускается; обычные тесты не зависят от чужого репозитория.
+CFCORE_BIN указывает на собранное ядро. История ставок берётся из
+репозитория, если не указан CFCORE_FIXINGS.
 """
 
 import csv
@@ -17,7 +16,9 @@ from normalizer.__main__ import main
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SAMPLE = ROOT / "tests/data/тестовые_сделки_МАИ.csv"
+REPO_ROOT = ROOT.parent
+SAMPLE = REPO_ROOT / "data/input/test_deals_mai.csv"
+DEFAULT_FIXINGS = REPO_ROOT / "data/input/key_rate.csv"
 GOLDEN = ROOT / "tests/golden"
 FIXINGS_SHA256 = "8b02d6c5b037689c5563addfb55af116e0a26da8ad89281924875fff935a5c5a"
 
@@ -27,21 +28,32 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(file))
 
 
-def test_pinned_cfcore_on_all_55_deals(tmp_path):
-    cfcore_path = os.environ.get("CFCORE_BIN")
-    fixings_path = os.environ.get("CFCORE_FIXINGS")
-    if not cfcore_path and not fixings_path:
-        pytest.skip("Для проверки настоящего ядра задайте CFCORE_BIN и CFCORE_FIXINGS")
-    if not cfcore_path or not fixings_path:
-        pytest.fail("Нужно задать одновременно CFCORE_BIN и CFCORE_FIXINGS")
+def _fixings_digest(content: bytes) -> str:
+    # Нормализуем только границы строк. Содержимое и порядок остаются в хеше.
+    return hashlib.sha256(content.replace(b"\r\n", b"\n")).hexdigest()
 
-    cfcore = Path(cfcore_path).resolve()
-    fixings = Path(fixings_path).resolve()
-    assert cfcore.is_file(), f"Нет исполняемого C++-ядра: {cfcore}"
+
+def test_fixings_digest_is_stable_and_checks_content():
+    data = DEFAULT_FIXINGS.read_bytes().replace(b"\r\n", b"\n")
+    assert _fixings_digest(data) == _fixings_digest(data.replace(b"\n", b"\r\n")) == FIXINGS_SHA256
+    assert _fixings_digest(data.replace(b",", b";", 1)) != FIXINGS_SHA256
+
+
+@pytest.fixture
+def cfcore():
+    binary = os.environ.get("CFCORE_BIN")
+    if not binary:
+        pytest.skip("Для проверки настоящего ядра задайте CFCORE_BIN")
+    path = Path(binary).resolve()
+    assert path.is_file(), f"Нет исполняемого C++-ядра: {path}"
+    return path
+
+
+def test_pinned_cfcore_on_all_55_deals(tmp_path, cfcore):
+    fixings = Path(os.environ.get("CFCORE_FIXINGS", DEFAULT_FIXINGS)).resolve()
     assert fixings.is_file(), f"Нет файла исторических ставок: {fixings}"
-    assert hashlib.sha256(fixings.read_bytes()).hexdigest() == FIXINGS_SHA256, (
-        "История ставок отличается от зафиксированной в INP-4: "
-        "нужен data/input/key_rate.csv из ядра коммита 6fa3b5c"
+    assert _fixings_digest(fixings.read_bytes()) == FIXINGS_SHA256, (
+        "История ставок отличается от зафиксированной в INP-4 (data/input/key_rate.csv)"
     )
 
     out = tmp_path / "result"
@@ -50,7 +62,12 @@ def test_pinned_cfcore_on_all_55_deals(tmp_path):
         "--cfcore", str(cfcore), "--fixings", str(fixings), "--threads", "1",
     ]) == 0
 
+    with (out / "normalized_deals.csv").open(encoding="utf-8", newline="") as file:
+        assert len(list(csv.DictReader(file, delimiter=";"))) == 45
+    assert len(_read_csv(out / "quarantine.csv")) == 10
     core = out / "core"
+    assert not (core / "events.csv").exists()
+    assert not (core / "deal_trace.csv").exists()
     assert _read_csv(core / "errors.csv") == _read_csv(GOLDEN / "core_errors.csv") == [
         {"instrument_id": "20", "error_code": "SCHEDULE_SUM_MISMATCH"}
     ]

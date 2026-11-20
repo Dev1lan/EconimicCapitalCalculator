@@ -70,7 +70,8 @@ def test_exported_csv_and_parquet_match_reference(tmp_path):
     _assert_normalized_rows(rows, expected)
 
     rejected = write_quarantine(normalized.quarantine, tmp_path / "quarantine.csv")
-    assert rejected.read_bytes() == (GOLDEN / "quarantine.csv").read_bytes()
+    expected_quarantine = (GOLDEN / "quarantine.csv").read_bytes().replace(b"\r\n", b"\n")
+    assert rejected.read_bytes() == expected_quarantine
 
     parquet = write_parquet(normalized.deals, tmp_path / "deals.parquet")
     table = pq.read_table(parquet)
