@@ -29,6 +29,7 @@ struct ChunkResult {
     std::vector<DealError> errors;
     std::vector<EventDetail> event_details;
     std::vector<RiskAllocation> risk_allocations;
+    std::map<int32_t, PrepaymentPortfolio> prepayment_portfolios;
 };
 
 void process_chunk(std::span<const Deal> deals, const DealArena& arena, const Policy& policy,
@@ -57,6 +58,9 @@ void process_chunk(std::span<const Deal> deals, const DealArena& arena, const Po
         }
         aggregate(deal, flows, bucketizer, result.accumulator);
         result.summaries.push_back(summary);
+        if (options.prepayment_rates && options.prepayment_rates->contains(deal.portfolio_key)) {
+            result.prepayment_portfolios[deal.portfolio_key].add(deal, flows, summary.closing_balance);
+        }
         if (options.keep_flows) {
             result.flows.insert(result.flows.end(), flows.begin(), flows.end());
         }
@@ -117,6 +121,12 @@ int Bucketizer::bucket(Date date) const {
     }
     const Date* end = upper_ + (kBucketCount - 2);
     return static_cast<int>(std::lower_bound(upper_, end, date) - upper_) + 1;
+}
+
+std::optional<Date> Bucketizer::upper_bound(int bucket) const {
+    if (bucket == 0) return report_date_;
+    if (bucket < 0 || bucket >= kBucketCount - 1) return std::nullopt;
+    return upper_[bucket - 1];
 }
 
 void Accumulator::add(const BucketKey& key, std::span<const CashFlow> flows,
@@ -205,6 +215,9 @@ PortfolioResult run_portfolio(std::span<const Deal> deals, const DealArena& aren
                                     chunk.event_details.end());
     }
     for (auto& chunk : chunks) {
+        for (const auto& [key, portfolio] : chunk.prepayment_portfolios) {
+            result.prepayment_portfolios[key].merge(portfolio);
+        }
         result.risk_allocations.insert(result.risk_allocations.end(),
                                        chunk.risk_allocations.begin(), chunk.risk_allocations.end());
     }

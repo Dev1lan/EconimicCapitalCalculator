@@ -4,6 +4,7 @@ add_library(cfcore STATIC
   src/date.cpp
   src/engine.cpp
   src/finance.cpp
+  src/prepayment.cpp
   src/risk.cpp
   src/schedule.cpp
   src/validate.cpp
@@ -37,7 +38,7 @@ if(NOT GTest_FOUND)
   FetchContent_MakeAvailable(googletest)
 endif()
 
-add_executable(cfcore_cli cli/main.cpp)
+add_executable(cfcore_cli cli/main.cpp cli/prepayment_cli.cpp)
 set_target_properties(cfcore_cli PROPERTIES OUTPUT_NAME cfcore)
 target_link_libraries(cfcore_cli PRIVATE cfcore)
 if(MINGW)
@@ -71,6 +72,8 @@ if(Python3_Interpreter_FOUND)
     Cli.test_repricing_reports_keep_financial_exports_identical Cli.test_trace_records_implicit_final_interest)
   add_test(NAME Cli.Irrbb COMMAND ${CFCORE_CLI_TEST_COMMAND}
     Cli.test_irrbb_allocations Cli.test_irrbb_incomplete_diagnostics)
+  add_test(NAME Cli.Prepayment COMMAND ${CFCORE_CLI_TEST_COMMAND}
+    Cli.test_prepayment_scenarios_and_conservation Cli.test_prepayment_validation_and_portfolio_rates)
   if(NOT WIN32)
     add_test(NAME Cli.ManifestEscapesSpecialCharacters COMMAND ${CFCORE_CLI_TEST_COMMAND}
       Cli.test_manifest_escapes_quotes_backslashes_and_controls)

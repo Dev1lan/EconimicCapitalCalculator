@@ -139,6 +139,80 @@ class Cli(unittest.TestCase):
         self.assertFalse(self.manifest(out)["risk_buckets"]["complete"])
         self.assertFalse((out / "risk_buckets.csv").exists())
 
+
+    def test_prepayment_scenarios_and_conservation(self):
+        path = self.folder / "deals.csv"
+        self.write_deals(path, deal(1), deal(2, portfolio_key=7, current_principal_amt=50000))
+        eligible = self.folder / "Портфели.csv"
+        eligible.write_text("portfolio_key,recast\n0,proportional\n7,proportional\n", encoding="utf-8")
+        baseline = self.folder / "baseline"
+        explicit_none = self.folder / "none"
+        self.run_cfcore(path, baseline)
+        self.run_cfcore(path, explicit_none, "--prepayment-model", "none")
+        self.assertFalse((explicit_none / "behavioral_buckets.csv").exists())
+        for name in FINANCIAL_OUTPUT:
+            self.assertEqual((baseline / name).read_bytes(), (explicit_none / name).read_bytes())
+        coefficients = {
+            "base": 1.0, "parallel-up": 0.8, "parallel-down": 1.2, "steepener": 0.8,
+            "flattener": 1.2, "short-up": 0.8, "short-down": 1.2,
+        }
+        cases = [(scenario, 0.02, coefficient) for scenario, coefficient in coefficients.items()]
+        cases += [("base", 0.0, 1.0), ("parallel-down", 0.95, 1.2)]
+        for index, (scenario, bvdpk, coefficient) in enumerate(cases):
+            with self.subTest(scenario=scenario, bvdpk=bvdpk):
+                out = self.folder / f"model-{index}"
+                self.run_cfcore(path, out, "--prepayment-model", "bvdpk", "--bvdpk", str(bvdpk),
+                                "--prepayment-eligible", str(eligible), "--prepayment-scenario", scenario)
+                for name in FINANCIAL_OUTPUT:
+                    self.assertEqual((baseline / name).read_bytes(), (out / name).read_bytes())
+                manifest = self.manifest(out)["prepayment"]
+                self.assertEqual(manifest["coefficient"], coefficient)
+                self.assertTrue(manifest["demonstration"])
+                scenario_rate = min(1, bvdpk * coefficient)
+                self.assertAlmostEqual(manifest["portfolios"][0]["rvdpk"], scenario_rate)
+                modeled = rows(out / "behavioral_buckets.csv")
+                for key, opening in (("0", 100000), ("7", 50000)):
+                    by_bucket = {int(row["bucket"]): row for row in modeled if row["portfolio_key"] == key}
+                    self.assertEqual(len(by_bucket), 19)
+                    first, second = by_bucket[1], by_bucket[2]
+                    self.assertEqual(int(first["interval_days"]), 30)
+                    self.assertAlmostEqual(float(first["prepayment_cf"]), opening * scenario_rate)
+                    self.assertAlmostEqual(float(first["interest_cf"]), opening * 0.10 * 30 / 365)
+                    self.assertAlmostEqual(float(second["scheduled_principal_cf"]), opening * (1 - scenario_rate))
+                    self.assertAlmostEqual(float(second["interest_cf"]), opening * (1 - scenario_rate) * 0.10 * 31 / 365)
+                    self.assertTrue(all(float(r["closing_balance"]) >= 0 for r in by_bucket.values()))
+                    self.assertAlmostEqual(sum(float(r["principal_cf"]) for r in by_bucket.values()), opening)
+                    for row in by_bucket.values():
+                        self.assertAlmostEqual(
+                            float(row["opening_balance"]) - float(row["principal_cf"]),
+                            float(row["closing_balance"]),
+                        )
+
+    def test_prepayment_validation_and_portfolio_rates(self):
+        path = self.folder / "deals.csv"
+        self.write_deals(path, deal(1), deal(2, portfolio_key=7), deal(3, portfolio_key=9, side="LIABILITY"))
+        eligible = self.folder / "eligible.csv"
+        eligible.write_text("portfolio_key,recast\n0,proportional\n7,proportional\n", encoding="utf-8")
+        rates = self.folder / "rates.csv"
+        rates.write_text("portfolio_key,bvdpk\n0,0.02\n7,0.04\n", encoding="utf-8")
+        out = self.folder / "model"
+        options = ["--prepayment-model", "bvdpk", "--prepayment-eligible", str(eligible)]
+        self.run_cfcore(path, out, *options, "--bvdpk-file", str(rates), "--bvdpk-source", "bank")
+        self.assertFalse(self.manifest(out)["prepayment"]["demonstration"])
+        self.assertEqual({(r["portfolio_key"], float(r["prepayment_cf"])) for r in
+                          rows(out / "behavioral_buckets.csv") if r["bucket"] == "1"},
+                         {("0", 2000.0), ("7", 4000.0)})
+        for args in ([], *[["--bvdpk", bad] for bad in ("NaN", "Inf", "-0.01", "1.01", "0.02junk")]):
+            run = subprocess.run([BINARY, "--input", str(path), "--output-dir", str(self.folder / "bad"),
+                                  *options, *args], capture_output=True, check=False)
+            self.assertEqual(run.returncode, 2)
+        eligible.write_text("portfolio_key,recast\n9,proportional\n", encoding="utf-8")
+        run = subprocess.run([BINARY, "--input", str(path), "--output-dir", str(out), *options,
+                              "--bvdpk", "0.02"], capture_output=True, check=False)
+        self.assertEqual(run.returncode, 3)
+        self.assertFalse((out / "behavioral_buckets.csv").exists())
+        self.assertFalse(self.manifest(out)["prepayment"]["complete"])
+
     def test_unicode_paths_and_manifest(self):
         input_dir = self.folder / "Входные данные"
         input_dir.mkdir()

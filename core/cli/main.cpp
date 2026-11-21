@@ -20,6 +20,7 @@
 #include "cfcore/engine.hpp"
 
 #include "model_input.hpp"
+#include "prepayment_cli.hpp"
 
 using namespace cfcore;
 
@@ -42,6 +43,7 @@ struct Arguments {
     bool round_output = false;
     bool risk_buckets = false;
     std::string risk_coupons;
+    prepayment_cli::Arguments prepayment;
 };
 
 void print_usage() {
@@ -57,6 +59,11 @@ void print_usage() {
         "  --details-only    не писать buckets.csv, errors.csv и манифест, без сводки на экране\n"
         "  --risk-buckets 8mr    отдельные регуляторные бакеты и детализация\n"
         "  --risk-coupons FILE  определённость и суммы FLOAT-купонов\n"
+        "  --prepayment-model none|bvdpk   модель досрочного погашения\n"
+        "  --prepayment-eligible FILE      однородные портфели и правило пересчёта\n"
+        "  --bvdpk RATE | --bvdpk-file FILE  доля за 30 дней\n"
+        "  --bvdpk-source demonstration|bank\n"
+        "  --prepayment-scenario NAME       сценарий БВДПК, по умолчанию base\n"
         "  --round-money     округлить суммы до копеек при выводе\n";
 }
 
@@ -103,6 +110,15 @@ Arguments parse_arguments(std::span<const std::string> argv) {
             if (value() != "8mr") throw std::runtime_error("--risk-buckets допускает только 8mr");
             args.risk_buckets = true;
         } else if (name == "--risk-coupons") args.risk_coupons = value();
+        else if (name == "--prepayment-model") {
+            const auto& model = value();
+            if (model != "none" && model != "bvdpk") throw std::runtime_error("unknown prepayment model");
+            args.prepayment.enabled = model == "bvdpk";
+        } else if (name == "--bvdpk") args.prepayment.bvdpk = value();
+        else if (name == "--bvdpk-file") args.prepayment.bvdpk_file = value();
+        else if (name == "--prepayment-eligible") args.prepayment.eligibility_file = value();
+        else if (name == "--prepayment-scenario") args.prepayment.scenario = value();
+        else if (name == "--bvdpk-source") args.prepayment.source = value();
         else if (name == "--round-money") args.round_output = true;
         else throw std::runtime_error("неизвестная опция " + name);
     }
@@ -112,6 +128,12 @@ Arguments parse_arguments(std::span<const std::string> argv) {
     if ((!args.risk_buckets && !args.risk_coupons.empty()) ||
         (args.risk_buckets && args.details_only)) {
         throw std::runtime_error("--risk-coupons требует --risk-buckets 8mr, несовместимый с --details-only");
+    }
+    const auto& prepayment = args.prepayment;
+    if ((!prepayment.enabled && (prepayment.bvdpk || !prepayment.bvdpk_file.empty() ||
+         !prepayment.eligibility_file.empty() || prepayment.scenario || prepayment.source)) ||
+        (prepayment.enabled && args.details_only)) {
+        throw std::runtime_error("Параметры БВДПК требуют --prepayment-model bvdpk без --details-only");
     }
     return args;
 }
@@ -334,6 +356,12 @@ int run_cli(std::span<const std::string> argv) {
         const std::filesystem::path out_dir(std::u8string(args.output_dir.begin(), args.output_dir.end()));
         std::filesystem::create_directories(out_dir);
 
+        std::optional<prepayment_cli::Configuration> prepayment;
+        if (args.prepayment.enabled) {
+            std::filesystem::remove(out_dir / "behavioral_buckets.csv");
+            prepayment = prepayment_cli::read_configuration(args.prepayment);
+        }
+        std::map<int32_t, PrepaymentPortfolio> prepayment_portfolios;
         const RiskCoupons risk_coupons = read_risk_coupons(args.risk_coupons);
         Accumulator risk_totals;
         size_t unresolved_risk_rows = 0;
@@ -390,6 +418,7 @@ int run_cli(std::span<const std::string> argv) {
         options.keep_repricing = args.write_events;
         options.trace_deal = args.trace_deal;
         options.risk_coupons = args.risk_buckets ? &risk_coupons : nullptr;
+        options.prepayment_rates = prepayment ? &prepayment->rates : nullptr;
 
         // Порция считается, результат записывается, память порции переиспользуется.
         while (reader.next_batch(kBatchSize, deals, arena, errors)) {
@@ -397,6 +426,9 @@ int run_cli(std::span<const std::string> argv) {
             accumulator.merge(result.accumulator);
             errors.insert(errors.end(), result.errors.begin(), result.errors.end());
             deals_ok += result.summaries.size();
+            for (const auto& [key, portfolio] : result.prepayment_portfolios) {
+                prepayment_portfolios[key].merge(portfolio);
+            }
             if (args.write_flows) {
                 write_flows(flows_file.get(), result.flows, threads, args.round_output);
             }
@@ -472,6 +504,35 @@ int run_cli(std::span<const std::string> argv) {
             }
         }
 
+        std::map<int32_t, std::array<BehavioralBucket, kBucketCount>> projections;
+        std::map<int32_t, std::string> prepayment_errors;
+        if (prepayment) {
+            for (const auto& [key, rate] : prepayment->rates) {
+                const auto portfolio = prepayment_portfolios.find(key);
+                if (portfolio == prepayment_portfolios.end()) {
+                    prepayment_errors[key] = "MISSING_PORTFOLIO";
+                } else if (const char* reason = portfolio->second.error()) {
+                    prepayment_errors[key] = reason;
+                } else {
+                    try {
+                        const double scenario_rate = std::min(1.0, rate * prepayment->scenario.coefficient);
+                        projections[key] = portfolio->second.project(scenario_rate);
+                    } catch (const std::runtime_error& error) {
+                        prepayment_errors[key] = error.what();
+                    }
+                }
+            }
+        }
+        const bool prepayment_complete = prepayment_errors.empty() && errors.empty();
+        if (prepayment && prepayment_complete) {
+            File behavioral = open_output(out_dir / "behavioral_buckets.csv");
+            prepayment_cli::write_bucket_header(behavioral.get());
+            for (const auto& [key, buckets] : projections) {
+                prepayment_cli::write_buckets(behavioral.get(), key, prepayment_portfolios.at(key).report_date(),
+                                             buckets);
+            }
+        }
+
         const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - started;
         File manifest = open_output(out_dir / "run_manifest.json");
         std::fprintf(manifest.get(),
@@ -491,14 +552,41 @@ int run_cli(std::span<const std::string> argv) {
             std::fprintf(manifest.get(), ",\n  \"risk_buckets\": {\"method\": \"8mr\", \"complete\": %s, "
                          "\"unresolved_rows\": %zu, \"contract_errors\": %zu}\n",
                          risk_complete ? "true" : "false", unresolved_risk_rows, errors.size());
-        } else {
-            std::fputc('\n', manifest.get());
         }
-        std::fprintf(manifest.get(), "}\n");
+        if (prepayment) {
+            const std::string value_source = args.prepayment.bvdpk_file.empty()
+                                               ? "cli" : args.prepayment.bvdpk_file;
+            std::fprintf(manifest.get(), ",\n  \"prepayment\": {\"enabled\": true, \"model\": \"bvdpk\", "
+                         "\"complete\": %s, \"demonstration\": %s, \"source\": %s, \"eligibility\": %s, "
+                         "\"scenario\": \"%s\", \"coefficient\": %.17g, \"calculation_policy\": \"%s\", "
+                         "\"contract_errors\": %zu, \"portfolios\": [",
+                         prepayment_complete ? "true" : "false", prepayment->demonstration ? "true" : "false",
+                         json_string(value_source).c_str(), json_string(args.prepayment.eligibility_file).c_str(),
+                         prepayment->scenario.name.data(), prepayment->scenario.coefficient, policy_name, errors.size());
+            const char* separator = "";
+            for (const auto& [key, rate] : prepayment->rates) {
+                std::fprintf(manifest.get(), "%s{\"portfolio_key\": %d, \"bvdpk\": %.17g, \"rvdpk\": %.17g",
+                             separator, key, rate, std::min(1.0, rate * prepayment->scenario.coefficient));
+                if (const auto error = prepayment_errors.find(key); error != prepayment_errors.end()) {
+                    std::fprintf(manifest.get(), ", \"error\": %s", json_string(error->second).c_str());
+                }
+                std::fputc('}', manifest.get());
+                separator = ", ";
+            }
+            std::fprintf(manifest.get(), "]}");
+        } else {
+            std::fprintf(manifest.get(), ",\n  \"prepayment\": {\"enabled\": false}");
+        }
+        std::fprintf(manifest.get(), "\n}\n");
+        if (prepayment && !prepayment_complete) {
+            std::fprintf(stderr, "модель БВДПК не рассчитана, см. run_manifest.json и errors.csv\n");
+        }
         if (args.risk_buckets && !risk_complete) {
             std::fprintf(stderr, "регуляторная агрегация не завершена, см. risk_bucket_allocations.csv и errors.csv\n");
             return 3;
         }
+
+        if (prepayment && !prepayment_complete) return 3;
 
         std::printf("сделок рассчитано: %zu, с ошибкой: %zu, потоков: %zu, потоков ЦП: %d, время: %.3f с\n",
                     deals_ok, errors.size(), flow_count, threads, elapsed.count());

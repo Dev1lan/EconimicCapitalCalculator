@@ -196,6 +196,48 @@ def test_manual_matches_deal_in_bank_portfolio(tmp_path, cfcore):
     assert [row for row in bucket_rows if row["portfolio_key"] == "0"] == _read_csv(manual / "core/buckets.csv")
 
 
+
+def test_prepayment_manual_and_bank_agree(tmp_path, cfcore):
+    source = tmp_path / "Банк.csv"
+    _bank_csv(source, BANK_DEAL, BANK_DEAL | {"deal_id": 900, "product": "Другой портфель"})
+    eligible = tmp_path / "Портфели.csv"
+    eligible.write_text("portfolio_key,recast\n0,proportional\n", encoding="utf-8")
+    options = ("--prepayment-model", "bvdpk", "--prepayment-eligible", str(eligible), "--bvdpk", "0.02")
+    manual, bank = tmp_path / "manual", tmp_path / "bank"
+    assert _run_deals(cfcore, EXAMPLES / "simple-irregular.json", manual, "--manual", *options) == 0
+    assert _run_deals(cfcore, source, bank, *options) == 0
+    buckets = _read_csv(bank / "core/behavioral_buckets.csv")
+    assert buckets == _read_csv(manual / "core/behavioral_buckets.csv")
+    assert {r["portfolio_key"] for r in buckets} == {"0"}
+    assert sum(float(r["principal_cf"]) for r in buckets) == pytest.approx(100000)
+    assert buckets[1]["scheduled_principal_cf"] == "30000"
+    assert buckets[1]["prepayment_cf"] == "2000"
+    assert buckets[1]["closing_balance"] == "68000"
+    assert float(buckets[2]["interest_cf"]) == pytest.approx(68000 * 0.10 / 365)
+    assert (manual / "core/deal_trace.csv").exists()
+    assert {row["instrument_id"] for row in _read_csv(bank / "core/cashflows.csv")} == {"105", "900"}
+
+
+def test_irrbb_portfolio_pipeline(tmp_path, cfcore):
+    source = tmp_path / "bank.csv"
+    _bank_csv(source, BANK_DEAL | {"rate_type_cd": "FLOAT", "base_indicator_rate": "0.08",
+                                  "interest_rate": "0.02", "repricing_dttm_schedule": "2022-10-15"})
+    coupons = tmp_path / "Coupons.csv"
+    coupons.write_text("instrument_id,payment_date,known_interest\n105,2022-09-30,500\n105,2022-10-31,\n",
+                       encoding="utf-8")
+    output = tmp_path / "out"
+    assert _run_deals(cfcore, source, output, "--risk-buckets", "8mr", "--risk-coupons", str(coupons)) == 0
+    allocations = _read_csv(output / "core/risk_bucket_allocations.csv")
+    principal = [row for row in allocations if row["flow_type"] == "PRINCIPAL"]
+    assert {(row["payment_date"], row["risk_date"]) for row in principal} == {
+        ("2022-09-10", "2022-09-10"), ("2022-10-01", "2022-10-01"),
+    }
+    interest = {row["coupon_status"]: row for row in allocations if row["flow_type"] == "INTEREST"}
+    assert interest["KNOWN"]["risk_date"] == "2022-10-15"
+    assert float(interest["KNOWN"]["risk_amount"]) == 500
+    assert float(interest["UNKNOWN"]["risk_amount"]) == pytest.approx(70000 * 0.02 / 365)
+
+
 def test_combined_diagnostics_without_cashflows(tmp_path, cfcore):
     source = tmp_path / "deals.csv"
     _bank_csv(source, BANK_DEAL | {"repricing_dttm_rate_schedule_fixed": "2022-09-30,0.20"})

@@ -45,4 +45,3 @@ void allocate_risk(const Deal& deal, const DealArena& arena, const Policy& polic
                    const RiskCoupons& coupons, std::vector<RiskAllocation>& output);
 
 }  // namespace cfcore
-

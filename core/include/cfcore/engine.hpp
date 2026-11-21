@@ -10,6 +10,7 @@
 #include "cfcore/event.hpp"
 #include "cfcore/finance.hpp"
 #include "cfcore/policy.hpp"
+#include "cfcore/prepayment.hpp"
 #include "cfcore/risk.hpp"
 
 namespace cfcore {
@@ -60,14 +61,13 @@ struct DealSummary {
     InterestSource current_interest_source = InterestSource::Unavailable;
 };
 
-inline constexpr int kBucketCount = 19;
-
 // Номер бакета 0..18 для даты. Границы считаются один раз от даты отчёта.
 class Bucketizer {
 public:
     explicit Bucketizer(Date report_date);
     int bucket(Date date) const;
     Date report_date() const { return report_date_; }
+    std::optional<Date> upper_bound(int bucket) const;
 
 private:
     Date report_date_;
@@ -113,6 +113,7 @@ struct RunOptions {
     bool keep_repricing = false;
     std::optional<int64_t> trace_deal = std::nullopt;
     const RiskCoupons* risk_coupons = nullptr;
+    const PrepaymentRates* prepayment_rates = nullptr;
 };
 
 struct PortfolioResult {
@@ -122,6 +123,7 @@ struct PortfolioResult {
     std::vector<DealError> errors;
     std::vector<EventDetail> event_details;
     std::vector<RiskAllocation> risk_allocations;
+    std::map<int32_t, PrepaymentPortfolio> prepayment_portfolios;
 };
 
 ErrorCode validate(const Deal& deal, const DealArena& arena);

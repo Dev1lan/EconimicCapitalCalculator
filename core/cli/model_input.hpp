@@ -73,4 +73,3 @@ void csv(const std::string& filename, std::string_view header, size_t columns, C
 }
 
 }  // namespace model_input
-

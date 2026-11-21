@@ -103,4 +103,3 @@ void allocate_risk(const Deal& deal, const DealArena& arena, const Policy& polic
 }
 
 }  // namespace cfcore
-

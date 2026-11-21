@@ -33,7 +33,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy", choices=POLICIES, help="расчётная политика, по умолчанию base")
     parser.add_argument("--risk-buckets", choices=("8mr",), help="регуляторные бакеты отдельно от договорных")
     parser.add_argument("--risk-coupons", type=Path, help="CSV с определённостью FLOAT-купонов")
+    parser.add_argument("--prepayment-model", choices=("none", "bvdpk"))
+    parser.add_argument("--prepayment-eligible", type=Path)
+    parser.add_argument("--prepayment-scenario")
+    parser.add_argument("--bvdpk")
+    parser.add_argument("--bvdpk-file", type=Path)
+    parser.add_argument("--bvdpk-source", choices=("demonstration", "bank"))
     args = parser.parse_args(argv)
+    prepayment_options = (
+        ("--prepayment-model", args.prepayment_model),
+        ("--prepayment-eligible", args.prepayment_eligible),
+        ("--prepayment-scenario", args.prepayment_scenario),
+        ("--bvdpk", args.bvdpk),
+        ("--bvdpk-file", args.bvdpk_file),
+        ("--bvdpk-source", args.bvdpk_source),
+    )
 
     if args.excel_etalon and args.policy not in (None, "legacy-excel"):
         parser.error("--excel-etalon несовместим с выбранной политикой")
@@ -41,7 +55,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.manual and args.cfcore is None:
         parser.error("--manual требует --cfcore")
     if args.cfcore is None and (args.events or args.trace_deal is not None or args.no_flows or args.excel_etalon
-                               or args.risk_buckets or args.risk_coupons):
+                               or args.risk_buckets or args.risk_coupons
+                               or any(value is not None for _, value in prepayment_options)):
         parser.error("параметры вывода и режима ядра требуют --cfcore")
 
     if args.cfcore and args.format == "parquet":
@@ -88,8 +103,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("--trace-deal должен совпадать с instrument_id ручной сделки")
             trace_deal = instrument_id
 
-        if args.risk_buckets and result.quarantine.height:
-            raise ValueError("Для регуляторного расчёта вход должен быть без карантина")
+        if (args.risk_buckets or args.prepayment_model == "bvdpk") and result.quarantine.height:
+            raise ValueError("Для расчёта риск-бакетов или БВДПК вход должен быть без карантина")
         if args.cfcore is not None:
             core_dir = output_dir / "core"
             command = [
@@ -110,6 +125,9 @@ def main(argv: list[str] | None = None) -> int:
                 command.extend(["--risk-buckets", args.risk_buckets])
             if args.risk_coupons:
                 command.extend(["--risk-coupons", str(args.risk_coupons.resolve())])
+            for name, value in prepayment_options:
+                if value is not None:
+                    command.extend([name, str(value.resolve() if isinstance(value, Path) else value)])
             if policy is not None:
                 command.extend(["--policy", policy])
             print(f"Запуск cfcore; результаты: {core_dir}", flush=True)
