@@ -11,3 +11,5 @@ COLUMNS = [
     "interest_payment", "principal_payment", "repricing_dttm_schedule",
     "repricing_dttm_rate_schedule_fixed",
 ]
+
+COLUMNS_V2 = COLUMNS + ["repricing_final_rate_schedule", "indicator_lag_days"]

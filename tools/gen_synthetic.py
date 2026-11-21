@@ -11,7 +11,7 @@ import random
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from normalized_format import COLUMNS  # noqa: E402
+from normalized_format import COLUMNS, COLUMNS_V2  # noqa: E402
 
 REPORT = dt.date(2022, 8, 31)
 INDICATOR = 0.08
@@ -59,6 +59,39 @@ def random_deal(rng, deal_id):
     return deal
 
 
+def add_v2_inputs(deal, deal_id, use_fixings):
+    # Отдельные детерминированные значения сохраняют исходный seed-поток v1.
+    if deal_id % 3 == 1:
+        deal["accrued_interest"] = 0
+    elif deal_id % 3 == 2:
+        deal["accrued_interest"] = round(deal["current_principal_amt"] * 0.0001, 2)
+    if deal["rate_type_cd"] != "FLOAT":
+        return
+    if use_fixings:
+        deal["base_indicator_rate"] = ""
+        deal["indicator_lag_days"] = 2 if deal_id % 4 == 0 else 0
+    else:
+        deal["base_indicator_rate"] = (0.055, 0.07, 0.085)[deal_id % 3]
+    if deal_id % 2 == 0:
+        first_rate = (0.09, 0.12, 0.14)[deal_id % 3]
+        deal["repricing_final_rate_schedule"] = f"2022-09-15,{first_rate} 2022-10-15,0.11"
+        deal["repricing_dttm_schedule"] = "2022-10-15"
+
+
+def write_fixings(path):
+    target = pathlib.Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow(("date", "value"))
+        for step in range(132):
+            year, month = divmod(step, 12)
+            date = dt.date(2012 + year, month + 1, 1)
+            if date > REPORT:
+                break
+            writer.writerow((date.isoformat(), (0.055, 0.07, 0.085, 0.095)[(step // 6) % 4]))
+
+
 def simple_schedule(rng, balance, maturity):
     """Несколько погашений с суммой, точно равной остатку."""
     parts = rng.randrange(1, 7)
@@ -91,15 +124,26 @@ def main():
     parser.add_argument("--deals", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--bad-share", type=float, default=0.0)
+    parser.add_argument("--contractual-v2", action="store_true", help="генерировать графики итоговых ставок и accrued")
+    parser.add_argument("--fixings-output", help="записать синтетическую историю индикатора для V2")
     args = parser.parse_args()
+    if args.fixings_output and not args.contractual_v2:
+        parser.error("--fixings-output требует --contractual-v2")
+    if args.fixings_output and pathlib.Path(args.fixings_output).resolve() == pathlib.Path(args.output).resolve():
+        parser.error("портфель и история fixing требуют разных файлов")
+    if args.fixings_output:
+        write_fixings(args.fixings_output)
 
     rng = random.Random(args.seed)
     pathlib.Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w", newline="") as f:
-        writer = csv.DictWriter(f, COLUMNS, delimiter=";", lineterminator="\n")
+        columns = COLUMNS_V2 if args.contractual_v2 else COLUMNS
+        writer = csv.DictWriter(f, columns, delimiter=";", lineterminator="\n")
         writer.writeheader()
         for deal_id in range(1, args.deals + 1):
             deal = random_deal(rng, deal_id)
+            if args.contractual_v2:
+                add_v2_inputs(deal, deal_id, args.fixings_output is not None)
             if rng.random() < args.bad_share:
                 spoil(rng, deal)
             writer.writerow(deal)
