@@ -81,3 +81,5 @@ python3 -m normalizer examples/manual/ann-float.json --manual --output-dir out/m
 Для расчётной политики CONTRACTUAL_V2 укажите `--policy contractual-v2` в командной строке
 или `"policy": "contractual-v2"` в JSON сделки. Используйте итоговые ставки из [контракта v2](../cf-normalizer/contracts/normalized-deals-v2.json).
 [Пример ANN/FLOAT в V2](../examples/manual/ann-float-v2.json)
+
+CONTRACTUAL_V2 содержит рабочие решения команды и требует согласования с куратором перед использованием в качестве банковской методики. Отчёт по всем сделкам МАИ, независимые эталоны, условия нагрузки и инструкция проверки PR описаны отдельно. [Финальная проверка](cf-release-validation.md)
