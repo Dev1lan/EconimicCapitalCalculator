@@ -40,6 +40,26 @@ TEST(Bucketizer, UpperBoundIsInclusive) {
     EXPECT_EQ(b.bucket(from_ymd(2042, 9, 1)), 18);
 }
 
+TEST(Bucketizer, CoversEvery8mrBoundary) {
+    const Date report = from_ymd(2022, 8, 31);
+    const Bucketizer bucketizer(report);
+    const Date dates[] = {
+        from_ymd(2022, 9, 30), from_ymd(2022, 11, 30), from_ymd(2023, 2, 28),
+        from_ymd(2023, 5, 31), from_ymd(2023, 8, 31), from_ymd(2024, 2, 29),
+        from_ymd(2024, 8, 31), from_ymd(2025, 8, 31), from_ymd(2026, 8, 31),
+        from_ymd(2027, 8, 31), from_ymd(2028, 8, 31), from_ymd(2029, 8, 31),
+        from_ymd(2030, 8, 31), from_ymd(2031, 8, 31), from_ymd(2032, 8, 31),
+        from_ymd(2037, 8, 31), from_ymd(2042, 8, 31),
+    };
+    EXPECT_EQ(bucketizer.bucket(report), 0);
+    EXPECT_EQ(bucketizer.bucket(report + 1), 1);
+    for (int i = 0; i < 17; ++i) {
+        EXPECT_EQ(bucketizer.bucket(dates[i]), i + 1);
+        EXPECT_EQ(bucketizer.bucket(dates[i] + 1), i + 2);
+    }
+    EXPECT_EQ(bucketizer.bucket(from_ymd(2060, 1, 1)), 18);
+}
+
 TEST(Aggregate, SplitsPrincipalAndInterestByBucket) {
     const Deal deal = deal_one();
     const std::vector<CashFlow> flows = {

@@ -28,6 +28,7 @@ struct ChunkResult {
     std::vector<DealSummary> summaries;
     std::vector<DealError> errors;
     std::vector<EventDetail> event_details;
+    std::vector<RiskAllocation> risk_allocations;
 };
 
 void process_chunk(std::span<const Deal> deals, const DealArena& arena, const Policy& policy,
@@ -40,8 +41,9 @@ void process_chunk(std::span<const Deal> deals, const DealArena& arena, const Po
         DealSummary summary;
         const bool trace_deal = options.trace_deal == deal.instrument_id;
         EventTrace* deal_trace = nullptr;
-        if (trace_deal || options.keep_repricing) {
-            trace.repricing_only = !trace_deal;
+        const bool trace_risk = options.risk_coupons && deal.rate_type == RateType::Float;
+        if (trace_deal || options.keep_repricing || trace_risk) {
+            trace.repricing_only = !trace_deal && !trace_risk;
             trace.rows.clear();
             deal_trace = &trace;
         }
@@ -58,8 +60,14 @@ void process_chunk(std::span<const Deal> deals, const DealArena& arena, const Po
         if (options.keep_flows) {
             result.flows.insert(result.flows.end(), flows.begin(), flows.end());
         }
-        if (deal_trace) {
+        if (options.risk_coupons) {
+            allocate_risk(deal, arena, policy, flows, trace.rows, *options.risk_coupons, result.risk_allocations);
+        }
+        if (trace_deal) {
             result.event_details.insert(result.event_details.end(), trace.rows.begin(), trace.rows.end());
+        } else if (options.keep_repricing) {
+            std::copy_if(trace.rows.begin(), trace.rows.end(), std::back_inserter(result.event_details),
+                         [](const EventDetail& row) { return row.type == EventType::RateReset; });
         }
     }
 }
@@ -195,6 +203,10 @@ PortfolioResult run_portfolio(std::span<const Deal> deals, const DealArena& aren
         result.errors.insert(result.errors.end(), chunk.errors.begin(), chunk.errors.end());
         result.event_details.insert(result.event_details.end(), chunk.event_details.begin(),
                                     chunk.event_details.end());
+    }
+    for (auto& chunk : chunks) {
+        result.risk_allocations.insert(result.risk_allocations.end(),
+                                       chunk.risk_allocations.begin(), chunk.risk_allocations.end());
     }
     std::sort(result.errors.begin(), result.errors.end(),
               [](const DealError& a, const DealError& b) { return a.instrument_id < b.instrument_id; });

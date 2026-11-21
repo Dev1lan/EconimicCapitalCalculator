@@ -22,4 +22,7 @@ struct ScheduleInfo {
 ErrorCode build_events(const Deal& deal, const DealArena& arena, const Policy& policy,
                        std::vector<Event>& events, ScheduleInfo& info);
 
+// Contractual planned schedule, independent of the accrual cutoff.
+ErrorCode next_planned_reset(const Deal& deal, const DealArena& arena, std::optional<Date>& next);
+
 }  // namespace cfcore::internal

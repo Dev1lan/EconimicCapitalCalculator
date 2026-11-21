@@ -19,6 +19,8 @@
 #include "cfcore/date.hpp"
 #include "cfcore/engine.hpp"
 
+#include "model_input.hpp"
+
 using namespace cfcore;
 
 namespace {
@@ -38,6 +40,8 @@ struct Arguments {
     bool write_events = false;
     std::optional<int64_t> trace_deal;
     bool round_output = false;
+    bool risk_buckets = false;
+    std::string risk_coupons;
 };
 
 void print_usage() {
@@ -51,6 +55,8 @@ void print_usage() {
         "  --events          писать events.csv с событиями пересмотра ставки\n"
         "  --trace-deal ID   писать deal_trace.csv для одной сделки\n"
         "  --details-only    не писать buckets.csv, errors.csv и манифест, без сводки на экране\n"
+        "  --risk-buckets 8mr    отдельные регуляторные бакеты и детализация\n"
+        "  --risk-coupons FILE  определённость и суммы FLOAT-купонов\n"
         "  --round-money     округлить суммы до копеек при выводе\n";
 }
 
@@ -93,11 +99,19 @@ Arguments parse_arguments(std::span<const std::string> argv) {
             }
             args.trace_deal = id;
         } else if (name == "--details-only") args.details_only = true;
+        else if (name == "--risk-buckets") {
+            if (value() != "8mr") throw std::runtime_error("--risk-buckets допускает только 8mr");
+            args.risk_buckets = true;
+        } else if (name == "--risk-coupons") args.risk_coupons = value();
         else if (name == "--round-money") args.round_output = true;
         else throw std::runtime_error("неизвестная опция " + name);
     }
     if (args.input.empty() || args.output_dir.empty()) {
         throw std::runtime_error("нужны --input и --output-dir");
+    }
+    if ((!args.risk_buckets && !args.risk_coupons.empty()) ||
+        (args.risk_buckets && args.details_only)) {
+        throw std::runtime_error("--risk-coupons требует --risk-buckets 8mr, несовместимый с --details-only");
     }
     return args;
 }
@@ -256,6 +270,50 @@ const char* side_name(Side side) {
     return side == Side::Asset ? "ASSET" : "LIABILITY";
 }
 
+RiskCoupons read_risk_coupons(const std::string& filename) {
+    RiskCoupons result;
+    if (!filename.empty()) {
+        model_input::csv(filename, "instrument_id,payment_date,known_interest", 3, [&](const auto& fields) {
+            const auto id = model_input::number<int64_t>(fields[0], "instrument_id");
+            Date date{};
+            if (!parse_date(fields[1], date)) throw std::runtime_error("invalid payment_date");
+            std::optional<double> amount;
+            if (!fields[2].empty()) {
+                amount = model_input::number<double>(fields[2], "known_interest");
+                if (*amount < 0) throw std::runtime_error("known_interest must be nonnegative");
+            }
+            if (!result.emplace(std::pair{id, date}, amount).second) {
+                throw std::runtime_error("duplicate coupon");
+            }
+        });
+    }
+    return result;
+}
+
+bool write_risk_allocation(FILE* file, const RiskAllocation& row, Accumulator& totals) {
+    const Bucketizer bucketizer(row.report_date);
+    std::fprintf(file, "%lld,%d,RUB,%s,", static_cast<long long>(row.instrument_id),
+                 row.portfolio_key, side_name(row.side));
+    std::fputs(format_date(row.report_date).c_str(), file);
+    std::fputc(',', file);
+    std::fputs(format_date(row.payment_date).c_str(), file);
+    std::fprintf(file, ",%s,%.17g,", row.type == FlowType::Principal ? "PRINCIPAL" : "INTEREST",
+                 row.original_amount);
+    if (row.next_planned_repricing) std::fputs(format_date(*row.next_planned_repricing).c_str(), file);
+    std::fputc(',', file);
+    if (row.risk_date) {
+        std::fputs(format_date(*row.risk_date).c_str(), file);
+        std::fprintf(file, ",%d,%d,%.17g", *row.risk_date - row.report_date,
+                     bucketizer.bucket(*row.risk_date), row.risk_amount);
+        const CashFlow weighted{row.instrument_id, *row.risk_date, row.type, row.risk_amount};
+        totals.add({row.portfolio_key, Currency::RUB, row.side}, std::span(&weighted, 1), bucketizer);
+    } else {
+        std::fprintf(file, ",,,");
+    }
+    std::fprintf(file, ",%s,%s\n", row.coupon_status, to_string(row.rule));
+    return row.risk_date.has_value();
+}
+
 int run_cli(std::span<const std::string> argv) {
     if (argv.size() == 1 || argv[1] == "--help") {
         print_usage();
@@ -275,6 +333,19 @@ int run_cli(std::span<const std::string> argv) {
 
         const std::filesystem::path out_dir(std::u8string(args.output_dir.begin(), args.output_dir.end()));
         std::filesystem::create_directories(out_dir);
+
+        const RiskCoupons risk_coupons = read_risk_coupons(args.risk_coupons);
+        Accumulator risk_totals;
+        size_t unresolved_risk_rows = 0;
+        File risk_file(nullptr, std::fclose);
+        if (args.risk_buckets) {
+            // A failed rerun must not leave an apparently valid aggregate from an older run.
+            std::filesystem::remove(out_dir / "risk_buckets.csv");
+            risk_file = open_output(out_dir / "risk_bucket_allocations.csv");
+            std::fprintf(risk_file.get(), "instrument_id,portfolio_key,currency,side,report_date,payment_date,"
+                         "flow_type,original_amount,next_planned_repricing,risk_date,risk_term_days,"
+                         "bucket,risk_amount,coupon_status,rule\n");
+        }
 
         File flows_file(nullptr, std::fclose);
         if (args.write_flows) {
@@ -318,6 +389,7 @@ int run_cli(std::span<const std::string> argv) {
         options.keep_flows = args.write_flows;
         options.keep_repricing = args.write_events;
         options.trace_deal = args.trace_deal;
+        options.risk_coupons = args.risk_buckets ? &risk_coupons : nullptr;
 
         // Порция считается, результат записывается, память порции переиспользуется.
         while (reader.next_batch(kBatchSize, deals, arena, errors)) {
@@ -335,6 +407,9 @@ int run_cli(std::span<const std::string> argv) {
                 if (trace_file && args.trace_deal == event.instrument_id) {
                     write_trace(trace_file.get(), event);
                 }
+            }
+            for (const RiskAllocation& row : result.risk_allocations) {
+                if (!write_risk_allocation(risk_file.get(), row, risk_totals)) ++unresolved_risk_rows;
             }
             for (const DealSummary& s : result.summaries) {
                 flow_count += s.flow_count;
@@ -385,6 +460,18 @@ int run_cli(std::span<const std::string> argv) {
                          to_string(error.code));
         }
 
+        const bool risk_complete = unresolved_risk_rows == 0 && errors.empty();
+        if (args.risk_buckets && risk_complete) {
+            File buckets = open_output(out_dir / "risk_buckets.csv");
+            std::fprintf(buckets.get(), "portfolio_key,currency,side,bucket,principal_cf,interest_cf\n");
+            for (const auto& [key, totals] : risk_totals.totals()) {
+                for (int k = 0; k < kBucketCount; ++k) {
+                    std::fprintf(buckets.get(), "%d,RUB,%s,%d,%.17g,%.17g\n", key.portfolio_key,
+                                 side_name(key.side), k, totals.principal[k], totals.interest[k]);
+                }
+            }
+        }
+
         const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - started;
         File manifest = open_output(out_dir / "run_manifest.json");
         std::fprintf(manifest.get(),
@@ -392,13 +479,26 @@ int run_cli(std::span<const std::string> argv) {
                      "  \"deals_ok\": %zu,\n  \"deals_failed\": %zu,\n  \"flows\": %zu,\n"
                      "  \"seconds\": %.3f,\n  \"policy\": {\n    \"force_act365\": %s,\n"
                      "    \"close_residual\": %s,\n    \"first_period_from_prev_pay\": %s,\n"
-                     "    \"include_payment_on_report\": %s,\n    \"float_rate_is_spread\": %s\n  }\n}\n",
+                     "    \"include_payment_on_report\": %s,\n    \"float_rate_is_spread\": %s\n  }",
                      json_string(args.input).c_str(), mode, policy_name, threads, deals_ok,
                      errors.size(), flow_count, elapsed.count(), policy.force_act365 ? "true" : "false",
                      policy.close_residual ? "true" : "false",
                      policy.first_period_from_prev_pay ? "true" : "false",
                      policy.include_payment_on_report ? "true" : "false",
                      policy.float_rate_is_spread ? "true" : "false");
+
+        if (args.risk_buckets) {
+            std::fprintf(manifest.get(), ",\n  \"risk_buckets\": {\"method\": \"8mr\", \"complete\": %s, "
+                         "\"unresolved_rows\": %zu, \"contract_errors\": %zu}\n",
+                         risk_complete ? "true" : "false", unresolved_risk_rows, errors.size());
+        } else {
+            std::fputc('\n', manifest.get());
+        }
+        std::fprintf(manifest.get(), "}\n");
+        if (args.risk_buckets && !risk_complete) {
+            std::fprintf(stderr, "регуляторная агрегация не завершена, см. risk_bucket_allocations.csv и errors.csv\n");
+            return 3;
+        }
 
         std::printf("сделок рассчитано: %zu, с ошибкой: %zu, потоков: %zu, потоков ЦП: %d, время: %.3f с\n",
                     deals_ok, errors.size(), flow_count, threads, elapsed.count());

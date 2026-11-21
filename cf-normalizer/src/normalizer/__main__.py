@@ -31,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-flows", action="store_true", help="не записывать cashflows.csv")
     parser.add_argument("--excel-etalon", action="store_true", help="использовать правила ядра для Excel-эталона")
     parser.add_argument("--policy", choices=POLICIES, help="расчётная политика, по умолчанию base")
+    parser.add_argument("--risk-buckets", choices=("8mr",), help="регуляторные бакеты отдельно от договорных")
+    parser.add_argument("--risk-coupons", type=Path, help="CSV с определённостью FLOAT-купонов")
     args = parser.parse_args(argv)
 
     if args.excel_etalon and args.policy not in (None, "legacy-excel"):
@@ -38,7 +40,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.manual and args.cfcore is None:
         parser.error("--manual требует --cfcore")
-    if args.cfcore is None and (args.events or args.trace_deal is not None or args.no_flows or args.excel_etalon):
+    if args.cfcore is None and (args.events or args.trace_deal is not None or args.no_flows or args.excel_etalon
+                               or args.risk_buckets or args.risk_coupons):
         parser.error("параметры вывода и режима ядра требуют --cfcore")
 
     if args.cfcore and args.format == "parquet":
@@ -85,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("--trace-deal должен совпадать с instrument_id ручной сделки")
             trace_deal = instrument_id
 
+        if args.risk_buckets and result.quarantine.height:
+            raise ValueError("Для регуляторного расчёта вход должен быть без карантина")
         if args.cfcore is not None:
             core_dir = output_dir / "core"
             command = [
@@ -101,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
                 command.extend(["--trace-deal", str(trace_deal)])
             if args.no_flows:
                 command.append("--no-flows")
+            if args.risk_buckets:
+                command.extend(["--risk-buckets", args.risk_buckets])
+            if args.risk_coupons:
+                command.extend(["--risk-coupons", str(args.risk_coupons.resolve())])
             if policy is not None:
                 command.extend(["--policy", policy])
             print(f"Запуск cfcore; результаты: {core_dir}", flush=True)

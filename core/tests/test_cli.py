@@ -60,6 +60,85 @@ class Cli(unittest.TestCase):
     def manifest(self, output_dir):
         return json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
 
+
+    def test_irrbb_allocations(self):
+        input_path = self.folder / "deals.csv"
+        output = self.folder / "risk"
+        baseline = self.folder / "baseline"
+        self.write_deals(
+            input_path,
+            deal(1),
+            deal(2, rate_type_cd="FLOAT", base_indicator_rate=0.08, interest_rate=-0.02,
+                 maturity_dttm="2023-08-31", principal_payment=(
+                     "2022-09-30,10000 2022-11-30,20000 2023-08-31,70000"),
+                 interest_payment="2022-09-30 2022-12-31 2023-08-31",
+                 repricing_dttm_schedule="2022-11-30 2023-02-28"),
+        )
+        coupons = self.folder / "Купоны.csv"
+        coupons.write_text(
+            "instrument_id,payment_date,known_interest\n"
+            "2,2022-09-30,500\n2,2022-12-31,\n2,2023-08-31,\n", encoding="utf-8",
+        )
+        self.run_cfcore(input_path, baseline, "--events", "--trace-deal", "2")
+        self.run_cfcore(input_path, output, "--events", "--trace-deal", "2",
+                        "--risk-buckets", "8mr", "--risk-coupons", str(coupons))
+        for name in (*FINANCIAL_OUTPUT, "events.csv", "deal_trace.csv"):
+            self.assertEqual((output / name).read_bytes(), (baseline / name).read_bytes(), name)
+        risk = rows(output / "risk_bucket_allocations.csv")
+        self.assertEqual([row["risk_date"] for row in risk if row["instrument_id"] == "1"],
+                         [row["payment_date"] for row in risk if row["instrument_id"] == "1"])
+        floating = {(row["payment_date"], row["flow_type"]): row for row in risk
+                    if row["instrument_id"] == "2"}
+        for date, risk_date, bucket, amount in (
+            ("2022-09-30", "2022-09-30", "1", 10000),
+            ("2022-11-30", "2022-11-30", "2", 20000),
+            ("2023-08-31", "2022-11-30", "2", 70000),
+        ):
+            row = floating[date, "PRINCIPAL"]
+            self.assertEqual((row["next_planned_repricing"], row["risk_date"], row["bucket"]),
+                             ("2022-11-30", risk_date, bucket))
+            self.assertEqual(float(row["risk_amount"]), amount)
+        known = floating["2022-09-30", "INTEREST"]
+        self.assertEqual((known["risk_date"], known["coupon_status"], float(known["risk_amount"])),
+                         ("2022-11-30", "KNOWN", 500))
+        unknown = floating["2022-12-31", "INTEREST"]
+        self.assertEqual((unknown["risk_date"], unknown["coupon_status"]), ("2022-12-31", "UNKNOWN"))
+        self.assertAlmostEqual(float(unknown["risk_amount"]), -0.02 * (90000 * 61 + 70000 * 31) / 365)
+        buckets = rows(output / "risk_buckets.csv")
+        self.assertEqual(len(buckets), 19)
+        for row in buckets:
+            for kind, column in (("PRINCIPAL", "principal_cf"), ("INTEREST", "interest_cf")):
+                self.assertAlmostEqual(float(row[column]), sum(
+                    float(a["risk_amount"]) for a in risk
+                    if a["bucket"] == row["bucket"] and a["flow_type"] == kind))
+
+    def test_irrbb_incomplete_diagnostics(self):
+        path = self.folder / "deals.csv"
+        coupons = self.folder / "coupons.csv"
+        coupons.write_text(
+            "instrument_id,payment_date,known_interest\n"
+            "3,2022-09-30,\n3,2022-10-31,\n4,2022-09-30,\n4,2022-10-31,\n", encoding="utf-8",
+        )
+        self.write_deals(
+            path,
+            deal(1, rate_type_cd="FLOAT", base_indicator_rate=0.08),
+            deal(2, rate_type_cd="FLOAT", base_indicator_rate=0.08, repricing_dttm_schedule="2022-09-15"),
+            deal(3, rate_type_cd="FLOAT", base_indicator_rate=0.08, repricing_dttm_schedule="2022-09-15",
+                 cap_limit_interest_rate=0.20),
+            deal(4, rate_type_cd="FLOAT", base_indicator_rate=0.08, repricing_dttm_schedule="2022-11-15"),
+        )
+        out = self.folder / "risk"
+        result = subprocess.run(
+            [BINARY, "--input", str(path), "--output-dir", str(out), "--risk-buckets", "8mr",
+             "--risk-coupons", str(coupons)], capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 3, result.stderr)
+        diagnostics = rows(out / "risk_bucket_allocations.csv")
+        self.assertTrue({"MISSING_PLANNED_REPRICING", "MISSING_COUPON_STATUS", "PREMIUM_UNRESOLVED",
+                         "INVALID_PLANNED_REPRICING"}.issubset({row["rule"] for row in diagnostics}))
+        self.assertFalse(self.manifest(out)["risk_buckets"]["complete"])
+        self.assertFalse((out / "risk_buckets.csv").exists())
+
     def test_unicode_paths_and_manifest(self):
         input_dir = self.folder / "Входные данные"
         input_dir.mkdir()

@@ -4,6 +4,7 @@ add_library(cfcore STATIC
   src/date.cpp
   src/engine.cpp
   src/finance.cpp
+  src/risk.cpp
   src/schedule.cpp
   src/validate.cpp
 )
@@ -68,6 +69,8 @@ if(Python3_Interpreter_FOUND)
     Cli.test_unicode_paths_and_manifest Cli.test_manifest_round_trips_native_path)
   add_test(NAME Cli.RepricingAndTrace COMMAND ${CFCORE_CLI_TEST_COMMAND}
     Cli.test_repricing_reports_keep_financial_exports_identical Cli.test_trace_records_implicit_final_interest)
+  add_test(NAME Cli.Irrbb COMMAND ${CFCORE_CLI_TEST_COMMAND}
+    Cli.test_irrbb_allocations Cli.test_irrbb_incomplete_diagnostics)
   if(NOT WIN32)
     add_test(NAME Cli.ManifestEscapesSpecialCharacters COMMAND ${CFCORE_CLI_TEST_COMMAND}
       Cli.test_manifest_escapes_quotes_backslashes_and_controls)

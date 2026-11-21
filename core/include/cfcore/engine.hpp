@@ -10,6 +10,7 @@
 #include "cfcore/event.hpp"
 #include "cfcore/finance.hpp"
 #include "cfcore/policy.hpp"
+#include "cfcore/risk.hpp"
 
 namespace cfcore {
 
@@ -111,6 +112,7 @@ struct RunOptions {
     bool keep_flows = false;
     bool keep_repricing = false;
     std::optional<int64_t> trace_deal = std::nullopt;
+    const RiskCoupons* risk_coupons = nullptr;
 };
 
 struct PortfolioResult {
@@ -119,6 +121,7 @@ struct PortfolioResult {
     std::vector<DealSummary> summaries;
     std::vector<DealError> errors;
     std::vector<EventDetail> event_details;
+    std::vector<RiskAllocation> risk_allocations;
 };
 
 ErrorCode validate(const Deal& deal, const DealArena& arena);

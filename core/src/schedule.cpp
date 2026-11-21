@@ -227,6 +227,41 @@ ErrorCode add_contractual_resets(const Deal& deal, const DealArena& arena,
 
 }  // namespace
 
+ErrorCode next_planned_reset(const Deal& deal, const DealArena& arena, std::optional<Date>& next) {
+    next.reset();
+    const auto consider = [&](Date date) {
+        if (date > deal.report_date && (!next || date < *next)) {
+            next = date;
+        }
+    };
+    for (const Span span : {deal.reset_schedule, deal.final_rate_schedule}) {
+        for (const auto& item : std::span(arena.reset_items).subspan(span.offset, span.length)) {
+            if (item.date < deal.start_date || item.date > deal.maturity_date) {
+                next.reset();
+                return ErrorCode::InvalidSchedule;
+            }
+            consider(item.date);
+        }
+    }
+    if (deal.reset_rule.kind == PaymentRule::Kind::EndDate) {
+        consider(deal.maturity_date);
+    }
+    std::vector<Date> dates;
+    Date previous = 0;
+    bool has_previous = false;
+    const Date cutoff = std::max(deal.report_date, deal.start_date - 1);
+    const auto code = rule_dates(deal.reset_rule, cutoff, deal.maturity_date + 1,
+                                 dates, previous, has_previous);
+    if (code != ErrorCode::Ok) {
+        next.reset();
+        return code;
+    }
+    if (!dates.empty()) {
+        consider(dates.front());
+    }
+    return ErrorCode::Ok;
+}
+
 ErrorCode build_events(const Deal& deal, const DealArena& arena, const Policy& policy,
                        std::vector<Event>& events, ScheduleInfo& info) {
     static thread_local DateSet interest;
